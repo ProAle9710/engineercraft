@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="panel" x1="64" y1="32" x2="448" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1a1916"/>
+      <stop offset="1" stop-color="#10100e"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="180" y1="70" x2="340" y2="430" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f3e0b0"/>
+      <stop offset="0.55" stop-color="#d4b06e"/>
+      <stop offset="1" stop-color="#b08940"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="18" width="476" height="476" rx="112" fill="url(#panel)"/>
+  <rect x="18" y="18" width="476" height="476" rx="112" fill="none" stroke="#c8a45a" stroke-width="6"/>
+  <g fill="none" stroke="#c8a45a" stroke-width="1.4" opacity="0.28">
+    <path d="M118 118h276v276H118z"/>
+    <path d="M118 190h276M118 256h276M118 322h276M190 118v276M256 118v276M322 118v276"/>
+  </g>
+  <g fill="#c8a45a" opacity="0.45">
+    <circle cx="190" cy="190" r="3"/>
+    <circle cx="322" cy="190" r="3"/>
+    <circle cx="190" cy="322" r="3"/>
+    <circle cx="322" cy="322" r="3"/>
+  </g>
+  <!-- Didone J -->
+  <path fill="url(#brass)" d="M232 86h86c6 0 10 4 10 10v8c0 4-2 7-6 8l-22 6c-3 1-4 3-4 6v132c0 58-32 96-92 96-28 0-52-8-70-24-3-3-3-8 1-11l12-10c3-3 8-3 11 0 12 10 26 15 46 15 32 0 50-20 50-66V124c0-3-1-5-4-6l-22-6c-4-1-6-4-6-8v-8c0-6 4-10 10-10z"/>
+  <!-- bar with diamond ends -->
+  <path fill="url(#brass)" d="M168 412h176l14 10-14 10H168l-14-10z"/>
+</svg>
