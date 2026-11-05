@@ -9,6 +9,10 @@ fn main() {
         res.set("LegalCopyright", "Copyright © 2026 Alejandro Infante");
         res.set("OriginalFilename", "javacraft.exe");
         res.set("InternalName", "JavaCraft");
+        if let Ok(v) = std::env::var("CARGO_PKG_VERSION") {
+            res.set("FileVersion", &v);
+            res.set("ProductVersion", &v);
+        }
         let _ = res.compile();
     }
     println!("cargo:rerun-if-changed=assets/icon.ico");

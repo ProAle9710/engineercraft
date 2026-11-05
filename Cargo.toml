@@ -1,6 +1,6 @@
 [package]
 name = "javacraft"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Entrenador de Java para escritorio"
 
@@ -12,6 +12,7 @@ regex = "1"
 dirs = "6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 webbrowser = "1"
+ureq = { version = "2", features = ["json"] }
 
 [build-dependencies]
 winresource = "0.1"

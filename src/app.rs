@@ -11,6 +11,7 @@ use crate::theme::{
     self, hair, ACCENT, ACCENT_DIM, BG, BG_ERR, BG_OK, DIM, ERR, GRID, GRID_STRONG, LINE, MUTED, OK,
     PANEL, PANEL_2, TEXT, WARN,
 };
+use crate::update;
 use eframe::egui::text::{CCursor, CCursorRange, LayoutJob};
 use eframe::egui::text_edit::TextEditState;
 use eframe::egui::{
@@ -22,7 +23,6 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const REPO_URL: &str = "https://github.com/ProAle9710/javacraft";
 
 enum ConsoleKind {
     Idle,
@@ -91,6 +91,11 @@ pub struct JavaCraft {
     snap_line: Option<usize>,
     lang: Lang,
     lang_anim: Option<LangAnim>,
+    update_tx: Sender<update::Event>,
+    update_rx: Receiver<update::Event>,
+    update_pending: Option<update::Pending>,
+    update_busy: bool,
+    update_msg: Option<String>,
 }
 
 struct LangAnim {
@@ -106,6 +111,15 @@ impl JavaCraft {
 
         let (tx, rx) = mpsc::channel();
         let (lint_tx, lint_rx) = mpsc::channel();
+        let (update_tx, update_rx) = mpsc::channel();
+        {
+            let tx = update_tx.clone();
+            let ctx = cc.egui_ctx.clone();
+            thread::spawn(move || {
+                let _ = tx.send(update::check_latest(crate::version::APP_VERSION));
+                ctx.request_repaint();
+            });
+        }
         let loaded = catalog::load();
         let (catalog, load_error) = match loaded {
             Ok(c) => (c, None),
@@ -167,7 +181,57 @@ impl JavaCraft {
             snap_line: None,
             lang,
             lang_anim: None,
+            update_tx,
+            update_rx,
+            update_pending: None,
+            update_busy: false,
+            update_msg: None,
         }
+    }
+
+    fn poll_update(&mut self, ctx: &Context) {
+        while let Ok(ev) = self.update_rx.try_recv() {
+            match ev {
+                update::Event::Available(p) => {
+                    self.update_pending = Some(p);
+                    self.update_busy = false;
+                }
+                update::Event::UpToDate => {
+                    self.update_pending = None;
+                    self.update_busy = false;
+                }
+                update::Event::Failed(e) => {
+                    self.update_busy = false;
+                    self.update_msg = Some(e);
+                }
+                update::Event::Installing => {
+                    self.update_busy = false;
+                    self.update_pending = None;
+                    self.update_msg = Some(
+                        tr(self.lang, "Instalador abierto (UAC)", "Installer opened (UAC)")
+                            .into(),
+                    );
+                }
+                update::Event::Done => {
+                    self.update_busy = false;
+                }
+            }
+            ctx.request_repaint();
+        }
+    }
+
+    fn start_update(&mut self, ctx: &Context) {
+        let Some(pending) = self.update_pending.clone() else {
+            return;
+        };
+        self.update_busy = true;
+        self.update_msg = None;
+        let tx = self.update_tx.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(update::apply(&pending));
+            ctx.request_repaint();
+        });
     }
 
     fn current(&self) -> Option<&Exercise> {
@@ -987,6 +1051,7 @@ impl eframe::App for JavaCraft {
         self.poll_run(ctx);
         self.poll_lint(ctx);
         self.poll_debug(ctx);
+        self.poll_update(ctx);
         self.handle_keys(ctx);
         self.tick_lang(ctx);
 
@@ -1055,11 +1120,56 @@ impl JavaCraft {
                                 .size(10.0)
                                 .color(ACCENT),
                         );
-                        ui.label(
-                            RichText::new("JAVACRAFT")
-                                .font(FontId::new(20.0, FontFamily::Proportional))
-                                .color(TEXT),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("JAVACRAFT")
+                                    .font(FontId::new(20.0, FontFamily::Proportional))
+                                    .color(TEXT),
+                            );
+                            ui.label(
+                                RichText::new(format!("v{}", crate::version::APP_VERSION))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(MUTED),
+                            );
+                            ui.add_space(10.0);
+                            ui.add(
+                                egui::Hyperlink::from_label_and_url(
+                                    RichText::new("GitHub ↗")
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(ACCENT),
+                                    update::REPO_URL,
+                                )
+                                .open_in_new_tab(true),
+                            );
+                            if self.update_busy {
+                                ui.label(
+                                    RichText::new(tr(lang, "DESCARGANDO…", "DOWNLOADING…"))
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(WARN),
+                                );
+                            } else if let Some(p) = &self.update_pending {
+                                let label = format!(
+                                    "{} v{}",
+                                    tr(lang, "ACTUALIZAR", "UPDATE"),
+                                    p.version
+                                );
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(label).monospace().size(11.0).color(BG),
+                                        )
+                                        .fill(ACCENT)
+                                        .stroke(Stroke::NONE),
+                                    )
+                                    .clicked()
+                                {
+                                    self.start_update(ui.ctx());
+                                }
+                            }
+                        });
                     });
 
                     ui.add_space(24.0);
@@ -1094,23 +1204,6 @@ impl JavaCraft {
                                 .size(11.0)
                                 .color(if self.jdk.is_some() { OK } else { ERR }),
                         );
-                        ui.add_space(12.0);
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(tr(lang, "REPO", "REPO"))
-                                        .monospace()
-                                        .size(11.0)
-                                        .color(TEXT),
-                                )
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(hair(LINE)),
-                            )
-                            .on_hover_text(REPO_URL)
-                            .clicked()
-                        {
-                            let _ = webbrowser::open(REPO_URL);
-                        }
                         ui.add_space(12.0);
                         let lang_btn = if lang == Lang::Es { "ES · en" } else { "es · EN" };
                         if ui
