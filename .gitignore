@@ -22,4 +22,5 @@ __pycache__/
 *.pyc
 .python-version
 *.log
+/engineercraft.exe
 /javacraft.exe

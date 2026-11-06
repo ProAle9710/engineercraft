@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ConsoleKind {
     Idle,
     Run,
@@ -44,7 +45,7 @@ struct WatchVar {
     history: Vec<String>,
 }
 
-pub struct JavaCraft {
+pub struct EngineerCraft {
     catalog: Vec<Exercise>,
     load_error: Option<String>,
     selected: usize,
@@ -111,7 +112,7 @@ struct LangAnim {
     swapped: bool,
 }
 
-impl JavaCraft {
+impl EngineerCraft {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
 
@@ -459,7 +460,7 @@ impl JavaCraft {
                         .color(pal().accent),
                 );
                 ui.label(
-                    RichText::new(format!("JavaCraft v{}", rel.version))
+                    RichText::new(format!("{} v{}", crate::version::APP_NAME, rel.version))
                         .font(FontId::new(20.0, FontFamily::Proportional))
                         .color(pal().text),
                 );
@@ -1135,7 +1136,7 @@ impl JavaCraft {
                 self.console = tr(self.lang, "No encuentro javac/java", "Cannot find javac/java").into();
                 self.error_cards = vec![Diag {
                     line: 1,
-                    message: "Instala un JDK y reinicia JavaCraft.".into(),
+                    message: "Instala un JDK y reinicia EngineerCraft.".into(),
                     extra: String::new(),
                 }];
                 self.output_lines.clear();
@@ -1324,7 +1325,7 @@ impl JavaCraft {
     }
 }
 
-impl eframe::App for JavaCraft {
+impl eframe::App for EngineerCraft {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.poll_run(ctx);
         self.poll_lint(ctx);
@@ -1382,7 +1383,7 @@ impl eframe::App for JavaCraft {
     }
 }
 
-impl JavaCraft {
+impl EngineerCraft {
     fn top_bar(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let done = self.progress.completed.len();
@@ -1403,7 +1404,7 @@ impl JavaCraft {
                         );
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("JAVACRAFT")
+                                RichText::new("ENGINEERCRAFT")
                                     .font(FontId::new(20.0, FontFamily::Proportional))
                                     .color(pal().text),
                             );
@@ -1782,20 +1783,21 @@ impl JavaCraft {
                             for i in 1..=lines.max(24) {
                                 let bad = self.error_lines.contains(&i);
                                 let dbg = self.debug_line == Some(i);
+                                let inv = pal().opposite();
                                 nums.append(
                                     &format!("{}{i:>3}\n", if dbg { "▶" } else { " " }),
                                     0.0,
                                     egui::text::TextFormat {
                                         font_id: font.clone(),
                                         color: if bad {
-                                            pal().err
+                                            inv.err
                                         } else if dbg {
                                             pal().warn
                                         } else {
                                             pal().muted
                                         },
                                         background: if bad {
-                                            pal().err_bg
+                                            inv.bg
                                         } else if dbg {
                                             pal().debug_bg
                                         } else {
@@ -1944,7 +1946,7 @@ impl JavaCraft {
         } else {
             match self.console_kind {
                 ConsoleKind::Ok => pal().bg_ok,
-                ConsoleKind::Err => pal().bg_err,
+                ConsoleKind::Err => pal().opposite().bg,
                 ConsoleKind::Debug => pal().bg_debug,
                 _ => pal().panel,
             }
@@ -1955,13 +1957,18 @@ impl JavaCraft {
             .show(ui, |ui| {
                 ui.set_min_height(ui.available_height().max(120.0));
                 ui.set_width(ui.available_width());
-                ui.label(RichText::new(kicker).monospace().size(10.0).color(kicker_color));
+                let err_p = if !raw && self.console_kind == ConsoleKind::Err {
+                    pal().opposite()
+                } else {
+                    pal()
+                };
+                ui.label(RichText::new(kicker).monospace().size(10.0).color(if !raw && self.console_kind == ConsoleKind::Err { err_p.err } else { kicker_color }));
                 ui.add_space(4.0);
                 if !self.console.is_empty() && !(raw && self.is_free()) {
                     ui.label(
                         RichText::new(&self.console)
                             .font(FontId::new(16.0, FontFamily::Proportional))
-                            .color(pal().text),
+                            .color(err_p.text),
                     );
                     ui.add_space(8.0);
                 }
@@ -1971,8 +1978,9 @@ impl JavaCraft {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         for card in &self.error_cards {
+                            let inv = pal().opposite();
                             Frame::NONE
-                                .fill(pal().bg_err)
+                                .fill(inv.bg)
                                 .inner_margin(Margin::same(10))
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
@@ -1980,11 +1988,11 @@ impl JavaCraft {
                                         RichText::new(format!("Línea {}", card.line))
                                             .monospace()
                                             .size(11.0)
-                                            .color(pal().err),
+                                            .color(inv.err),
                                     );
                                     ui.add(
                                         Label::new(
-                                            RichText::new(&card.message).color(pal().text).size(14.0),
+                                            RichText::new(&card.message).color(inv.text).size(14.0),
                                         )
                                         .wrap(),
                                     );
@@ -1994,7 +2002,7 @@ impl JavaCraft {
                                         card.extra.clone()
                                     };
                                     if !hint.is_empty() {
-                                        ui.label(RichText::new(hint).color(pal().dim).size(13.0));
+                                        ui.label(RichText::new(hint).color(inv.dim).size(13.0));
                                     }
                                 });
                             ui.add_space(6.0);

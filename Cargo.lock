@@ -917,6 +917,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "engineercraft"
+version = "0.1.6"
+dependencies = [
+ "dirs",
+ "eframe",
+ "image",
+ "regex",
+ "serde",
+ "serde_json",
+ "ureq",
+ "webbrowser",
+ "winresource",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1506,21 +1521,6 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
-
-[[package]]
-name = "javacraft"
-version = "0.1.6"
-dependencies = [
- "dirs",
- "eframe",
- "image",
- "regex",
- "serde",
- "serde_json",
- "ureq",
- "webbrowser",
- "winresource",
-]
 
 [[package]]
 name = "jni"

@@ -117,6 +117,10 @@ impl Palette {
         }
     }
 
+    pub fn opposite(self) -> Self {
+        Self::get(!self.dark)
+    }
+
     pub fn lerp(a: Self, b: Self, t: f32) -> Self {
         let t = t.clamp(0.0, 1.0);
         Self {

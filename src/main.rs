@@ -43,6 +43,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "JavaCraft",
         options,
-        Box::new(|cc| Ok(Box::new(app::JavaCraft::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::EngineerCraft::new(cc)))),
     )
 }

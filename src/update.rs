@@ -1,8 +1,11 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
-pub const REPO_URL: &str = "https://github.com/ProAle9710/javacraft";
-const API_LATEST: &str = "https://api.github.com/repos/ProAle9710/javacraft/releases/latest";
+pub const REPO_URL: &str = "https://github.com/ProAle9710/engineercraft";
+const API_LATEST: &[&str] = &[
+    "https://api.github.com/repos/ProAle9710/engineercraft/releases/latest",
+    "https://api.github.com/repos/ProAle9710/javacraft/releases/latest",
+];
 
 #[derive(Clone)]
 pub struct Pending {
@@ -41,7 +44,36 @@ pub fn check_latest(current: &str) -> Event {
 }
 
 fn fetch(current: &str) -> Result<Option<Pending>, String> {
-    let rel: GhRelease = ureq::get(API_LATEST)
+    let mut best: Option<Pending> = None;
+    let mut last_err: Option<String> = None;
+    let mut ok = false;
+    for url in API_LATEST {
+        match fetch_one(url, current) {
+            Ok(Some(p)) => {
+                ok = true;
+                if best
+                    .as_ref()
+                    .map(|b| newer(&p.version, &b.version))
+                    .unwrap_or(true)
+                {
+                    best = Some(p);
+                }
+            }
+            Ok(None) => ok = true,
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if best.is_some() {
+        return Ok(best);
+    }
+    if ok {
+        return Ok(None);
+    }
+    Err(last_err.unwrap_or_else(|| "sin releases".into()))
+}
+
+fn fetch_one(url: &str, current: &str) -> Result<Option<Pending>, String> {
+    let rel: GhRelease = ureq::get(url)
         .set("User-Agent", &format!("JavaCraft/{current}"))
         .set("Accept", "application/vnd.github+json")
         .call()
@@ -53,16 +85,24 @@ fn fetch(current: &str) -> Result<Option<Pending>, String> {
     if !newer(&version, current) {
         return Ok(None);
     }
-    let msi_url = rel
-        .assets
-        .iter()
-        .find(|a| a.name.ends_with(".msi"))
-        .map(|a| a.browser_download_url.clone());
+    let msi_url = pick_msi(&rel.assets);
     Ok(Some(Pending {
         version,
         msi_url,
         page_url: rel.html_url,
     }))
+}
+
+fn pick_msi(assets: &[GhAsset]) -> Option<String> {
+    let url = |pred: fn(&str) -> bool| {
+        assets
+            .iter()
+            .find(|a| pred(&a.name))
+            .map(|a| a.browser_download_url.clone())
+    };
+    url(|n| n.starts_with("EngineerCraft") && n.ends_with(".msi"))
+        .or_else(|| url(|n| n.starts_with("JavaCraft") && n.ends_with(".msi")))
+        .or_else(|| url(|n| n.ends_with(".msi")))
 }
 
 fn newer(remote: &str, local: &str) -> bool {
@@ -102,7 +142,7 @@ fn download_and_install(url: &str, version: &str) -> Result<(), String> {
 
 fn msi_path(version: &str) -> Result<PathBuf, String> {
     let dir = std::env::temp_dir();
-    Ok(dir.join(format!("JavaCraft-{version}.msi")))
+    Ok(dir.join(format!("EngineerCraft-{version}.msi")))
 }
 
 #[cfg(windows)]

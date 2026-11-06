@@ -9,6 +9,21 @@ pub struct Release {
 /// Añade un bloque arriba al publicar (versión = CARGO_PKG_VERSION).
 pub const RELEASES: &[Release] = &[
     Release {
+        version: "0.2.1",
+        es: &[
+            "Pasa a llamarse EngineerCraft (mismo instalador: actualiza JavaCraft).",
+            "Logo E y repo github.com/ProAle9710/engineercraft.",
+            "Cierre automático de comillas y snippets if/for/while.",
+            "SIMPLE / AVANZADO y tema claro/oscuro.",
+        ],
+        en: &[
+            "Renamed EngineerCraft (same installer: upgrades JavaCraft).",
+            "E logo and repo github.com/ProAle9710/engineercraft.",
+            "Auto-close quotes and if/for/while snippets.",
+            "SIMPLE / ADVANCED and light/dark theme.",
+        ],
+    },
+    Release {
         version: "0.1.6",
         es: &[
             "Cierre automático de comillas, paréntesis y llaves.",

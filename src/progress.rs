@@ -59,8 +59,13 @@ impl Progress {
 }
 
 fn file_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("javacraft")
-        .join("progress.json")
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    let neu = base.join("engineercraft");
+    let old = base.join("javacraft").join("progress.json");
+    let dest = neu.join("progress.json");
+    if !dest.exists() && old.exists() {
+        let _ = fs::create_dir_all(&neu);
+        let _ = fs::copy(&old, &dest);
+    }
+    dest
 }

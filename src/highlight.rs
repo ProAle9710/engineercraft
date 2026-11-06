@@ -1,4 +1,4 @@
-use crate::theme::{hair, pal};
+use crate::theme::{hair, pal, Palette};
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Color32, FontId, Stroke};
 use std::collections::HashSet;
@@ -20,21 +20,15 @@ pub fn java(
         rest = next;
         let bad = error_lines.contains(&line_no);
         let dbg = debug_line == Some(line_no);
-        let bg = if bad {
-            p.err_bg
+        let (syn, bg, underline) = if bad {
+            let o = p.opposite();
+            (o, o.bg, hair(o.err))
         } else if dbg {
-            p.debug_bg
+            (p, p.debug_bg, Stroke::new(2.5_f32, p.warn))
         } else {
-            Color32::TRANSPARENT
+            (p, Color32::TRANSPARENT, Stroke::NONE)
         };
-        let underline = if bad {
-            hair(p.err)
-        } else if dbg {
-            Stroke::new(2.5_f32, p.warn)
-        } else {
-            Stroke::NONE
-        };
-        tokenize_line(line, bg, underline, font.clone(), &mut job);
+        tokenize_line(line, syn, bg, underline, font.clone(), &mut job);
         if !rest.is_empty() || code.ends_with('\n') {
             // keep going
         }
@@ -64,8 +58,14 @@ fn split_line(s: &str) -> (&str, &str) {
     }
 }
 
-fn tokenize_line(line: &str, bg: Color32, underline: Stroke, font: FontId, job: &mut LayoutJob) {
-    let p = pal();
+fn tokenize_line(
+    line: &str,
+    p: Palette,
+    bg: Color32,
+    underline: Stroke,
+    font: FontId,
+    job: &mut LayoutJob,
+) {
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
     while i < chars.len() {

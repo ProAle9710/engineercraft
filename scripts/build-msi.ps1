@@ -22,13 +22,13 @@ cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
 $meta = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
-$exe = Join-Path $meta.target_directory "release\javacraft.exe"
+$exe = Join-Path $meta.target_directory "release\engineercraft.exe"
 if (-not (Test-Path $exe)) { throw "no exe: $exe" }
 
 $stage = Join-Path $root "dist\stage"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $stage "exercises") | Out-Null
-Copy-Item $exe (Join-Path $stage "javacraft.exe")
+Copy-Item $exe (Join-Path $stage "engineercraft.exe")
 Copy-Item (Join-Path $root "exercises\*") (Join-Path $stage "exercises") -Recurse
 
 function New-Id([string]$s) {
@@ -40,13 +40,13 @@ $icon = Join-Path $root "assets\icon.ico"
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine('<?xml version="1.0" encoding="UTF-8"?>')
 [void]$sb.AppendLine('<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">')
-[void]$sb.AppendLine("  <Package Name=`"JavaCraft`" Manufacturer=`"Alejandro Infante`" Version=`"$version`" UpgradeCode=`"7F3A1C2E-9B44-4D18-A6E1-2C8F0B7D4A11`" Scope=`"perMachine`">")
-[void]$sb.AppendLine('    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="Ya hay una version mas nueva de JavaCraft." />')
+[void]$sb.AppendLine("  <Package Name=`"EngineerCraft`" Manufacturer=`"Alejandro Infante`" Version=`"$version`" UpgradeCode=`"7F3A1C2E-9B44-4D18-A6E1-2C8F0B7D4A11`" Scope=`"perMachine`">")
+[void]$sb.AppendLine('    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="Ya hay una version mas nueva de EngineerCraft." />')
 [void]$sb.AppendLine('    <MediaTemplate EmbedCab="yes" />')
 [void]$sb.AppendLine("    <Icon Id=`"AppIcon`" SourceFile=`"$icon`" />")
 [void]$sb.AppendLine('    <Property Id="ARPPRODUCTICON" Value="AppIcon" />')
 [void]$sb.AppendLine('    <StandardDirectory Id="ProgramFiles64Folder">')
-[void]$sb.AppendLine('      <Directory Id="INSTALLFOLDER" Name="JavaCraft">')
+[void]$sb.AppendLine('      <Directory Id="INSTALLFOLDER" Name="EngineerCraft">')
 [void]$sb.AppendLine('        <Directory Id="EXERCISES" Name="exercises">')
 
 function Emit-Dir($fsPath, $indent) {
@@ -66,13 +66,13 @@ function Emit-Dir($fsPath, $indent) {
 Emit-Dir (Join-Path $stage "exercises") "          "
 [void]$sb.AppendLine('        </Directory>')
 [void]$sb.AppendLine('        <Component Id="AppExe" Guid="*">')
-[void]$sb.AppendLine("          <File Id=`"JavaCraftExe`" Source=`"$stage\javacraft.exe`" KeyPath=`"yes`">")
-[void]$sb.AppendLine('            <Shortcut Name="JavaCraft" Directory="ProgramMenuFolder" Advertise="no" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />')
+[void]$sb.AppendLine("          <File Id=`"EngineerCraftExe`" Source=`"$stage\engineercraft.exe`" KeyPath=`"yes`">")
+[void]$sb.AppendLine('            <Shortcut Name="EngineerCraft" Directory="ProgramMenuFolder" Advertise="no" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />')
 [void]$sb.AppendLine('          </File>')
 [void]$sb.AppendLine('        </Component>')
 [void]$sb.AppendLine('      </Directory>')
 [void]$sb.AppendLine('    </StandardDirectory>')
-[void]$sb.AppendLine('    <Feature Id="Main" Title="JavaCraft" Level="1">')
+[void]$sb.AppendLine('    <Feature Id="Main" Title="EngineerCraft" Level="1">')
 [void]$sb.AppendLine('      <ComponentGroupRef Id="All" />')
 [void]$sb.AppendLine('    </Feature>')
 [void]$sb.AppendLine('    <ComponentGroup Id="All" Directory="INSTALLFOLDER">')
@@ -87,18 +87,20 @@ $refXml = ($refs | ForEach-Object { "      <ComponentRef Id=`"$_`" />" }) -join 
 $wxs = $wxs.Replace("      <ComponentRef Id=`"AppExe`" />", "      <ComponentRef Id=`"AppExe`" />`n$refXml")
 $wixDir = Join-Path $root "wix"
 New-Item -ItemType Directory -Force -Path $wixDir | Out-Null
-Set-Content -Path (Join-Path $wixDir "JavaCraft.wxs") -Value $wxs -Encoding UTF8
+Set-Content -Path (Join-Path $wixDir "EngineerCraft.wxs") -Value $wxs -Encoding UTF8
 
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-$out = Join-Path $root "dist\JavaCraft-$version.msi"
+$out = Join-Path $root "dist\EngineerCraft-$version.msi"
 New-Item -ItemType Directory -Force -Path (Join-Path $root "dist") | Out-Null
-wix build (Join-Path $wixDir "JavaCraft.wxs") -arch x64 -out $out
+wix build (Join-Path $wixDir "EngineerCraft.wxs") -arch x64 -out $out
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 Get-Item $out | Format-List FullName, Length
 Write-Host "MSI $version listo: $out"
 
 if ($Publish) {
-    gh release create "v$version" $out --repo ProAle9710/javacraft --title "JavaCraft $version" --notes "Instalador Windows. Actualiza una instalacion previa (MajorUpgrade)."
+    $alias = Join-Path $root "dist\JavaCraft-$version.msi"
+    Copy-Item $out $alias -Force
+    gh release create "v$version" $out $alias --repo ProAle9710/engineercraft --title "EngineerCraft $version" --notes "Instalador Windows. Actualiza JavaCraft y EngineerCraft (mismo UpgradeCode)."
     if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
     Write-Host "Release v$version publicado"
 }

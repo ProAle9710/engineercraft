@@ -156,7 +156,7 @@ fn emit_pause(
 
 fn prepare(source: &str) -> Result<PathBuf, String> {
     match runner::compile_debug(source) {
-        runner::CompileStatus::Ok => Ok(std::env::temp_dir().join("javacraft-debug")),
+        runner::CompileStatus::Ok => Ok(std::env::temp_dir().join("engineercraft-debug")),
         runner::CompileStatus::NoJdk => Err("No encuentro JDK / jdb.".into()),
         runner::CompileStatus::Errors(errors) => {
             let msg = errors

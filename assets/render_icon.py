@@ -1,4 +1,4 @@
-"""Render a workshop J icon to PNG + ICO."""
+"""Render a workshop E icon to PNG + ICO."""
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -61,7 +61,7 @@ def main() -> None:
             g.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=(200, 164, 90, 120))
 
     fnt = font(int(s * 0.58))
-    letter = "J"
+    letter = "E"
     bbox = d.textbbox((0, 0), letter, font=fnt)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     tx = (s - tw) / 2 - bbox[0]
