@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Serialize, Deserialize)]
 pub struct Progress {
@@ -17,10 +18,19 @@ pub struct Progress {
     pub last_seen_version: String,
     #[serde(default)]
     pub code_lang: String,
+    /// 0 = automático según resolución.
+    #[serde(default)]
+    pub ui_zoom: f32,
+    #[serde(default = "default_font_size")]
+    pub font_size: f32,
 }
 
 fn default_dark() -> bool {
     true
+}
+
+fn default_font_size() -> f32 {
+    13.5
 }
 
 impl Default for Progress {
@@ -33,6 +43,8 @@ impl Default for Progress {
             dark: true,
             last_seen_version: String::new(),
             code_lang: String::new(),
+            ui_zoom: 0.0,
+            font_size: default_font_size(),
         }
     }
 }
@@ -52,7 +64,8 @@ impl Progress {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(raw) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(path, raw);
+            let _ = fs::write(&path, raw);
+            lock_private(&path);
         }
     }
 
@@ -96,5 +109,39 @@ fn file_path() -> PathBuf {
         let _ = fs::create_dir_all(&neu);
         let _ = fs::copy(&old, &dest);
     }
+    let _ = fs::create_dir_all(&neu);
+    lock_private(&neu);
+    if dest.exists() {
+        lock_private(&dest);
+    }
     dest
+}
+
+fn lock_private(path: &Path) {
+    #[cfg(windows)]
+    {
+        let Some(s) = path.to_str() else {
+            return;
+        };
+        let Ok(user) = std::env::var("USERNAME") else {
+            return;
+        };
+        if user.is_empty() {
+            return;
+        };
+        let mut cmd = Command::new("icacls");
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let grant = format!("{user}:(F)");
+        let _ = cmd
+            .args([s, "/inheritance:r", "/grant:r", &grant])
+            .output();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
 }

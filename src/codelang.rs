@@ -39,6 +39,41 @@ impl CodeLang {
         format!("{}:{exercise_id}", self.id())
     }
 
+    pub fn todo_hint(self, ui: crate::i18n::Lang) -> &'static str {
+        match (self, ui) {
+            (Self::Python, crate::i18n::Lang::Es) => {
+                "Escribe debajo del TODO. En Python no hay main ni tipos."
+            }
+            (Self::Python, crate::i18n::Lang::En) => {
+                "Write below the TODO. Python has no main and no types."
+            }
+            (Self::CSharp, crate::i18n::Lang::Es) => {
+                "Escribe debajo del TODO, indentado dentro de Main."
+            }
+            (Self::CSharp, crate::i18n::Lang::En) => {
+                "Write below the TODO, indented inside Main."
+            }
+            (_, crate::i18n::Lang::Es) => "Escribe debajo del TODO, indentado dentro de main.",
+            (_, crate::i18n::Lang::En) => "Write below the TODO, indented inside main.",
+        }
+    }
+
+    pub fn file_hint(self, ui: crate::i18n::Lang) -> String {
+        let f = format!("Starter.{}", self.ext());
+        match (self, ui) {
+            (Self::Python, crate::i18n::Lang::Es) => {
+                format!("Archivo completo ({f}). CORRER muestra la consola.")
+            }
+            (Self::Python, crate::i18n::Lang::En) => {
+                format!("Full file ({f}). RUN shows the console.")
+            }
+            (_, crate::i18n::Lang::Es) => {
+                format!("Archivo completo ({f}). CORRER muestra la consola.")
+            }
+            (_, crate::i18n::Lang::En) => format!("Full file ({f}). RUN shows the console."),
+        }
+    }
+
     pub fn ext(self) -> &'static str {
         match self {
             Self::Java => "java",

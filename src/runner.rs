@@ -1,9 +1,58 @@
 use regex::Regex;
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+static SCRATCH: AtomicU64 = AtomicU64::new(1);
+
+pub struct TempWork {
+    pub path: PathBuf,
+}
+
+impl TempWork {
+    pub fn create() -> Result<Self, String> {
+        let n = SCRATCH.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("ec-{}-{n}", std::process::id()));
+        fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TempWork {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+pub(crate) fn harden(cmd: &mut Command, cwd: &Path) {
+    cmd.current_dir(cwd);
+    cmd.env_clear();
+    if let Ok(p) = std::env::var("PATH") {
+        cmd.env("PATH", p);
+    }
+    if let Ok(r) = std::env::var("SystemRoot") {
+        cmd.env("SystemRoot", &r);
+        cmd.env("WINDIR", r);
+    }
+    if let Ok(w) = std::env::var("WINDIR") {
+        cmd.env("WINDIR", w);
+    }
+    cmd.env("TEMP", cwd);
+    cmd.env("TMP", cwd);
+    cmd.env("TMPDIR", cwd);
+    cmd.env("HOME", cwd);
+    cmd.env("USERPROFILE", cwd);
+    cmd.env("APPDATA", cwd);
+    cmd.env("LOCALAPPDATA", cwd);
+    cmd.env("PYTHONSAFEPATH", "1");
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    cmd.env("DOTNET_CLI_HOME", cwd);
+    cmd.env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
+    cmd.env("COMPlus_EnableDiagnostics", "0");
+}
 
 #[derive(Clone)]
 pub struct Diag {
@@ -51,7 +100,10 @@ pub fn lint(source: &str, lang: crate::codelang::CodeLang) -> Vec<Diag> {
 
 fn lint_java(source: &str) -> Vec<Diag> {
     let mut errors = student_mistakes(source);
-    match compile_source(source, "engineercraft-lint") {
+    let Ok(work) = TempWork::create() else {
+        return errors;
+    };
+    match compile_in(&work.path, source) {
         CompileStatus::Ok | CompileStatus::NoJdk => errors,
         CompileStatus::Errors(javac) => {
             for e in javac {
@@ -66,7 +118,7 @@ fn lint_java(source: &str) -> Vec<Diag> {
 }
 
 #[allow(dead_code)]
-pub fn format_errors(errors: &[Diag]) -> String {
+pub fn format_errors(errors: &[Diag], lang: crate::codelang::CodeLang) -> String {
     let n = errors.len();
     let mut s = format!(
         "SINTAXIS  ·  {n} {}\n",
@@ -78,7 +130,7 @@ pub fn format_errors(errors: &[Diag]) -> String {
             s.push_str(&e.extra);
             s.push('\n');
         }
-        s.push_str(explain(&e.message));
+        s.push_str(explain(&e.message, lang));
         s.push('\n');
     }
     s
@@ -90,21 +142,21 @@ pub enum CompileStatus {
     Errors(Vec<Diag>),
 }
 
-pub fn compile_debug(source: &str) -> CompileStatus {
-    compile_source(source, "engineercraft-debug")
+pub fn compile_debug(source: &str) -> Result<TempWork, CompileStatus> {
+    let work = TempWork::create().map_err(|_| CompileStatus::Errors(vec![Diag {
+        line: 1,
+        message: "No pude crear el directorio temporal.".into(),
+        extra: String::new(),
+    }]))?;
+    match compile_in(&work.path, source) {
+        CompileStatus::Ok => Ok(work),
+        other => Err(other),
+    }
 }
 
-fn compile_source(source: &str, folder: &str) -> CompileStatus {
+fn compile_in(dir: &Path, source: &str) -> CompileStatus {
     if jdk_version().is_none() {
         return CompileStatus::NoJdk;
-    }
-    let dir = std::env::temp_dir().join(folder);
-    if fs::create_dir_all(&dir).is_err() {
-        return CompileStatus::Errors(vec![Diag {
-            line: 1,
-            message: "No pude crear el directorio temporal.".into(),
-            extra: String::new(),
-        }]);
     }
     if fs::write(dir.join("Starter.java"), source).is_err() {
         return CompileStatus::Errors(vec![Diag {
@@ -113,8 +165,9 @@ fn compile_source(source: &str, folder: &str) -> CompileStatus {
             extra: String::new(),
         }]);
     }
-    let compile = command("javac")
-        .current_dir(&dir)
+    let mut compile = command("javac");
+    harden(&mut compile, dir);
+    let compile = compile
         .args(["-g", "-encoding", "UTF-8", "Starter.java"])
         .output();
     let compile = match compile {
@@ -156,6 +209,50 @@ fn student_mistakes(source: &str) -> Vec<Diag> {
     out
 }
 
+fn mistakes_cs(source: &str) -> Vec<Diag> {
+    let mut out = Vec::new();
+    for (i, line) in source.lines().enumerate() {
+        let n = i + 1;
+        let t = line.trim_start();
+        if t.contains("System.out.println") {
+            out.push(Diag {
+                line: n,
+                message: "System.out.println no existe en C#".into(),
+                extra: "Usa Console.WriteLine(...);".into(),
+            });
+        } else if t.starts_with("let ") {
+            out.push(Diag {
+                line: n,
+                message: "let no existe en C#".into(),
+                extra: "Escribe el tipo: string name = \"Ana\";".into(),
+            });
+        }
+    }
+    out
+}
+
+fn mistakes_py(source: &str) -> Vec<Diag> {
+    let mut out = Vec::new();
+    for (i, line) in source.lines().enumerate() {
+        let n = i + 1;
+        let t = line.trim_start();
+        if t.contains("System.out.println") || t.contains("Console.WriteLine") {
+            out.push(Diag {
+                line: n,
+                message: "Eso no es Python".into(),
+                extra: "Usa print(...)".into(),
+            });
+        } else if t.starts_with("String ") || t.starts_with("string ") {
+            out.push(Diag {
+                line: n,
+                message: "Python no declara el tipo".into(),
+                extra: String::new(),
+            });
+        }
+    }
+    out
+}
+
 pub fn evaluate(
     source: &str,
     needles: &[String],
@@ -173,14 +270,22 @@ fn evaluate_java(source: &str, needles: &[String]) -> Outcome {
         return Outcome::NoJdk;
     }
 
-    let dir = work_dir();
-    match compile_source(source, "engineercraft-run") {
+    let Ok(work) = TempWork::create() else {
+        return Outcome::CompileError {
+            errors: vec![Diag {
+                line: 1,
+                message: "No pude crear el directorio temporal.".into(),
+                extra: String::new(),
+            }],
+        };
+    };
+    match compile_in(&work.path, source) {
         CompileStatus::NoJdk => return Outcome::NoJdk,
         CompileStatus::Errors(errors) => return Outcome::CompileError { errors },
         CompileStatus::Ok => {}
     }
 
-    match run_java(&dir, Duration::from_secs(8)) {
+    match run_java(&work.path, Duration::from_secs(8)) {
         RunJava::Timeout => Outcome::Timeout,
         RunJava::Failed { stdout, stderr } => {
             let (line, message) = parse_runtime(&stderr);
@@ -207,9 +312,10 @@ enum RunJava {
     Timeout,
 }
 
-fn run_java(dir: &PathBuf, timeout: Duration) -> RunJava {
-    let mut child = match command("java")
-        .current_dir(dir)
+fn run_java(dir: &Path, timeout: Duration) -> RunJava {
+    let mut cmd = command("java");
+    harden(&mut cmd, dir);
+    let mut child = match cmd
         .args(["-Dfile.encoding=UTF-8", "Starter"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -316,42 +422,66 @@ fn parse_runtime(stderr: &str) -> (Option<usize>, String) {
     (line, exception)
 }
 
-pub fn explain(message: &str) -> &'static str {
+pub fn explain(message: &str, lang: crate::codelang::CodeLang) -> &'static str {
     let m = message.to_ascii_lowercase();
-    if m.contains("cannot find symbol") {
-        "Esa variable o método no existe. Créala en el TODO, con tipo y nombre: String nombre = \"Ana\";"
-    } else if m.contains("let no existe") {
-        "let es de JavaScript. En Java: String nombre = \"Ana\";"
-    } else if m.contains("no uses var") {
-        "No uses var. Escribe el tipo: int age = 18;"
-    } else if m.contains("console.log") {
-        "En Java se imprime con System.out.println(...);"
-    } else if m.contains("';' expected") || m.contains("';' esperado") {
-        "Falta un punto y coma al final de la línea."
-    } else if m.contains("not a statement") {
-        "Java no reconoce esa línea como instrucción. Revisa la sintaxis (tipo nombre = valor;)."
-    } else if m.contains("reached end of file") {
-        "Falta un } de cierre. Cuenta las llaves { }."
-    } else if m.contains("incompatible types") {
-        "El tipo no coincide. int va con números, String con texto entre comillas, boolean con true/false."
-    } else if m.contains("array required") {
-        "Estás usando [índice] en algo que no es un arreglo."
-    } else if m.contains("variable") && m.contains("might not have been initialized") {
-        "La variable se declaró pero no tiene valor antes de usarla."
-    } else if m.contains("class starter is public") {
-        "La clase pública debe llamarse Starter y estar en Starter.java. No cambies el nombre de la clase."
-    } else if m.contains("illegal start") {
-        "Hay un símbolo de más o de menos. Revisa paréntesis, comillas y llaves."
-    } else if m.contains("else without if") {
-        "Hay un else sin su if. No borres el if de arriba."
-    } else if m.contains("arrayindexoutofbounds") {
-        "El índice está fuera del arreglo. El primero es [0] y el último es length - 1."
-    } else if m.contains("nullpointer") {
-        "Estás usando un objeto que vale null. Asigna el valor antes de llamarle un método."
-    } else if m.contains("string index out of range") {
-        "charAt() se salió del texto. El primer carácter es charAt(0)."
-    } else {
-        "Lee el mensaje de javac: te dice el archivo, la línea y qué no entiende."
+    match lang {
+        crate::codelang::CodeLang::Python => {
+            if m.contains("is not defined") || m.contains("nameerror") {
+                "Esa variable no existe. En Python se asigna con =  (no con :). Ejemplo: firstName = \"Ana\""
+            } else if m.contains("syntaxerror") {
+                "Python no entiende esa línea. Revisa : indentación, = y paréntesis."
+            } else if m.contains("usa = no") || m.contains("no declara el tipo") {
+                "En Python: nombre = \"valor\"  — sin tipo y sin punto y coma."
+            } else {
+                "Lee el mensaje de Python: te dice el archivo, la línea y qué no entiende."
+            }
+        }
+        crate::codelang::CodeLang::CSharp => {
+            if m.contains("does not exist") || m.contains("cs0103") {
+                "Esa variable no existe. Créala: string nombre = \"Ana\";"
+            } else if m.contains("';' expected") {
+                "Falta un punto y coma al final de la línea."
+            } else {
+                "Lee el mensaje del compilador de C# (dotnet): línea y qué no entiende."
+            }
+        }
+        crate::codelang::CodeLang::Java => {
+            if m.contains("cannot find symbol") {
+                "Esa variable o método no existe. Créala en el TODO, con tipo y nombre: String nombre = \"Ana\";"
+            } else if m.contains("let no existe") {
+                "let es de JavaScript. En Java: String nombre = \"Ana\";"
+            } else if m.contains("no uses var") {
+                "No uses var. Escribe el tipo: int age = 18;"
+            } else if m.contains("console.log") {
+                "En Java se imprime con System.out.println(...);"
+            } else if m.contains("';' expected") || m.contains("';' esperado") {
+                "Falta un punto y coma al final de la línea."
+            } else if m.contains("not a statement") {
+                "Java no reconoce esa línea como instrucción. Revisa la sintaxis (tipo nombre = valor;)."
+            } else if m.contains("reached end of file") {
+                "Falta un } de cierre. Cuenta las llaves { }."
+            } else if m.contains("incompatible types") {
+                "El tipo no coincide. int va con números, String con texto entre comillas, boolean con true/false."
+            } else if m.contains("array required") {
+                "Estás usando [índice] en algo que no es un arreglo."
+            } else if m.contains("variable") && m.contains("might not have been initialized") {
+                "La variable se declaró pero no tiene valor antes de usarla."
+            } else if m.contains("class starter is public") {
+                "La clase pública debe llamarse Starter y estar en Starter.java. No cambies el nombre de la clase."
+            } else if m.contains("illegal start") {
+                "Hay un símbolo de más o de menos. Revisa paréntesis, comillas y llaves."
+            } else if m.contains("else without if") {
+                "Hay un else sin su if. No borres el if de arriba."
+            } else if m.contains("arrayindexoutofbounds") {
+                "El índice está fuera del arreglo. El primero es [0] y el último es length - 1."
+            } else if m.contains("nullpointer") {
+                "Estás usando un objeto que vale null. Asigna el valor antes de llamarle un método."
+            } else if m.contains("string index out of range") {
+                "charAt() se salió del texto. El primer carácter es charAt(0)."
+            } else {
+                "Lee el mensaje de javac: te dice el archivo, la línea y qué no entiende."
+            }
+        }
     }
 }
 
@@ -372,8 +502,7 @@ fn evaluate_dotnet(source: &str, needles: &[String]) -> Outcome {
     if crate::codelang::detect(crate::codelang::CodeLang::CSharp).is_none() {
         return Outcome::NoJdk;
     }
-    let dir = std::env::temp_dir().join("engineercraft-cs");
-    if fs::create_dir_all(&dir).is_err() {
+    let Ok(work) = TempWork::create() else {
         return Outcome::CompileError {
             errors: vec![Diag {
                 line: 1,
@@ -381,24 +510,19 @@ fn evaluate_dotnet(source: &str, needles: &[String]) -> Outcome {
                 extra: String::new(),
             }],
         };
+    };
+    if write_cs(&work.path, source).is_err() {
+        return Outcome::CompileError {
+            errors: vec![Diag {
+                line: 1,
+                message: "No pude escribir Starter.cs.".into(),
+                extra: String::new(),
+            }],
+        };
     }
-    let csproj = r#"<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
-    <RollForward>LatestMajor</RollForward>
-    <StartupObject>Starter</StartupObject>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>disable</Nullable>
-  </PropertyGroup>
-</Project>
-"#;
-    let _ = fs::write(dir.join("Starter.csproj"), csproj);
-    let _ = fs::write(dir.join("Starter.cs"), source);
-    let compile = command("dotnet")
-        .current_dir(&dir)
-        .args(["build", "-nologo", "-v", "q"])
-        .output();
+    let mut compile = command("dotnet");
+    compile.current_dir(&work.path);
+    let compile = compile.args(["build", "-nologo", "-v", "q"]).output();
     let compile = match compile {
         Ok(o) => o,
         Err(_) => return Outcome::NoJdk,
@@ -414,8 +538,8 @@ fn evaluate_dotnet(source: &str, needles: &[String]) -> Outcome {
         };
     }
     let mut run = command("dotnet");
-    run.current_dir(&dir)
-        .args(["run", "--no-build", "-nologo"]);
+    harden(&mut run, &work.path);
+    run.args(["run", "--no-build", "-nologo"]);
     match run_cmd(run, Duration::from_secs(8)) {
         RunJava::Timeout => Outcome::Timeout,
         RunJava::Failed { stdout, stderr } => Outcome::RuntimeError {
@@ -431,10 +555,16 @@ fn evaluate_python(source: &str, needles: &[String]) -> Outcome {
     let Some((bin, extra)) = crate::codelang::python_invocation() else {
         return Outcome::NoJdk;
     };
-    let dir = std::env::temp_dir().join("engineercraft-py");
-    let _ = fs::create_dir_all(&dir);
-    let file = dir.join("Starter.py");
-    if fs::write(&file, source).is_err() {
+    let Ok(work) = TempWork::create() else {
+        return Outcome::CompileError {
+            errors: vec![Diag {
+                line: 1,
+                message: "No pude crear el directorio temporal.".into(),
+                extra: String::new(),
+            }],
+        };
+    };
+    if fs::write(work.path.join("Starter.py"), source).is_err() {
         return Outcome::CompileError {
             errors: vec![Diag {
                 line: 1,
@@ -444,15 +574,17 @@ fn evaluate_python(source: &str, needles: &[String]) -> Outcome {
         };
     }
     let mut cmd = command(&bin);
-    cmd.current_dir(&dir);
+    harden(&mut cmd, &work.path);
     for a in &extra {
         cmd.arg(a);
     }
+    cmd.arg("-I");
     cmd.arg("Starter.py");
     match run_cmd(cmd, Duration::from_secs(8)) {
         RunJava::Timeout => Outcome::Timeout,
         RunJava::Failed { stdout, stderr } => {
             let (line, message) = parse_python(&stderr);
+            let line = Some(relocate_py(source, line, &message));
             if stderr.to_ascii_lowercase().contains("syntaxerror") {
                 Outcome::CompileError {
                     errors: vec![Diag {
@@ -473,37 +605,106 @@ fn evaluate_python(source: &str, needles: &[String]) -> Outcome {
     }
 }
 
+fn write_cs(dir: &Path, source: &str) -> std::io::Result<()> {
+    let csproj = r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <StartupObject>Starter</StartupObject>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+</Project>
+"#;
+    fs::write(dir.join("Starter.csproj"), csproj)?;
+    fs::write(dir.join("Starter.cs"), source)
+}
+
 fn lint_csharp(source: &str) -> Vec<Diag> {
-    match evaluate_dotnet(source, &[]) {
-        Outcome::CompileError { errors } => errors,
-        _ => Vec::new(),
+    let mut errors = mistakes_cs(source);
+    let Ok(work) = TempWork::create() else {
+        return errors;
+    };
+    if write_cs(&work.path, source).is_err() {
+        return errors;
     }
+    let mut compile = command("dotnet");
+    compile.current_dir(&work.path);
+    let Ok(out) = compile.args(["build", "-nologo", "-v", "q"]).output() else {
+        return errors;
+    };
+    if !out.status.success() {
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for e in parse_dotnet(&err) {
+            if !errors.iter().any(|a| a.line == e.line) {
+                errors.push(e);
+            }
+        }
+        errors.sort_by_key(|e| e.line);
+    }
+    errors
 }
 
 fn lint_python(source: &str) -> Vec<Diag> {
+    let mut errors = mistakes_py(source);
     let Some((bin, extra)) = crate::codelang::python_invocation() else {
-        return Vec::new();
+        return errors;
     };
-    let dir = std::env::temp_dir().join("engineercraft-py-lint");
-    let _ = fs::create_dir_all(&dir);
-    let file = dir.join("Starter.py");
-    let _ = fs::write(&file, source);
+    let Ok(work) = TempWork::create() else {
+        return errors;
+    };
+    let file = work.path.join("Starter.py");
+    if fs::write(&file, source).is_err() {
+        return errors;
+    }
     let mut cmd = command(&bin);
-    cmd.args(extra).args(["-m", "py_compile"]).arg(&file);
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
+    harden(&mut cmd, &work.path);
+    for a in extra {
+        cmd.arg(a);
+    }
+    cmd.args(["-I", "-m", "py_compile"]).arg(&file);
+    let Ok(out) = cmd.output() else {
+        return errors;
     };
     if out.status.success() {
-        return Vec::new();
+        return errors;
     }
     let err = String::from_utf8_lossy(&out.stderr);
     let (line, message) = parse_python(&err);
-    vec![Diag {
+    errors.push(Diag {
         line: line.unwrap_or(1),
         message,
         extra: String::new(),
-    }]
+    });
+    errors
+}
+
+fn ident_not_defined(message: &str) -> Option<String> {
+    let re = Regex::new(r"name '([^']+)' is not defined").ok()?;
+    Some(re.captures(message)?.get(1)?.as_str().to_string())
+}
+
+fn relocate_py(source: &str, line: Option<usize>, message: &str) -> usize {
+    if let Some(name) = ident_not_defined(message) {
+        let pat = format!(r"(?m)^\s*{}\s*[:=]", regex::escape(&name));
+        if let Ok(re) = Regex::new(&pat) {
+            if let Some(n) = source
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| re.is_match(l))
+                .map(|(i, _)| i + 1)
+                .next()
+            {
+                return n;
+            }
+        }
+    }
+    line.unwrap_or(1)
 }
 
 fn parse_dotnet(stderr: &str) -> Vec<Diag> {
@@ -607,10 +808,6 @@ fn run_cmd(mut cmd: Command, timeout: Duration) -> RunJava {
             }
         }
     }
-}
-
-fn work_dir() -> PathBuf {
-    std::env::temp_dir().join("engineercraft-run")
 }
 
 pub(crate) fn command(name: &str) -> Command {

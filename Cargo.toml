@@ -13,6 +13,7 @@ dirs = "6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 webbrowser = "1"
 ureq = { version = "2", features = ["json"] }
+sha2 = "0.10"
 
 [build-dependencies]
 winresource = "0.1"

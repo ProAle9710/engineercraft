@@ -1,4 +1,6 @@
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::PathBuf;
 
 pub const REPO_URL: &str = "https://github.com/ProAle9710/engineercraft";
@@ -11,6 +13,7 @@ const API_LATEST: &[&str] = &[
 pub struct Pending {
     pub version: String,
     pub msi_url: Option<String>,
+    pub msi_sha256: Option<String>,
     pub page_url: String,
 }
 
@@ -25,6 +28,8 @@ struct GhRelease {
 struct GhAsset {
     name: String,
     browser_download_url: String,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 pub enum Event {
@@ -85,24 +90,48 @@ fn fetch_one(url: &str, current: &str) -> Result<Option<Pending>, String> {
     if !newer(&version, current) {
         return Ok(None);
     }
-    let msi_url = pick_msi(&rel.assets);
+    if !rel.html_url.starts_with("https://github.com/ProAle9710/") {
+        return Err("origen de release no permitido".into());
+    }
+    let msi = pick_msi(&rel.assets);
     Ok(Some(Pending {
         version,
-        msi_url,
+        msi_url: msi.as_ref().map(|a| a.browser_download_url.clone()),
+        msi_sha256: msi.and_then(|a| sha_from_digest(a.digest.as_deref())),
         page_url: rel.html_url,
     }))
 }
 
-fn pick_msi(assets: &[GhAsset]) -> Option<String> {
-    let url = |pred: fn(&str) -> bool| {
-        assets
-            .iter()
-            .find(|a| pred(&a.name))
-            .map(|a| a.browser_download_url.clone())
-    };
-    url(|n| n.starts_with("EngineerCraft") && n.ends_with(".msi"))
-        .or_else(|| url(|n| n.starts_with("JavaCraft") && n.ends_with(".msi")))
-        .or_else(|| url(|n| n.ends_with(".msi")))
+fn allowed_msi_url(url: &str) -> bool {
+    let https = url.starts_with("https://");
+    let host = url.starts_with("https://github.com/ProAle9710/")
+        || url.starts_with("https://objects.githubusercontent.com/")
+        || url.starts_with("https://release-assets.githubusercontent.com/");
+    https && host && !url.contains("..")
+}
+
+fn allowed_msi_name(name: &str) -> bool {
+    let n = name.rsplit('/').next().unwrap_or(name);
+    (n.starts_with("EngineerCraft-") || n.starts_with("JavaCraft-"))
+        && n.ends_with(".msi")
+        && !n.contains("..")
+        && !n.contains('\\')
+}
+
+fn sha_from_digest(d: Option<&str>) -> Option<String> {
+    let d = d?.trim();
+    let hex = d.strip_prefix("sha256:")?;
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(hex.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn pick_msi(assets: &[GhAsset]) -> Option<&GhAsset> {
+    assets.iter().find(|a| {
+        allowed_msi_name(&a.name) && allowed_msi_url(&a.browser_download_url)
+    })
 }
 
 fn newer(remote: &str, local: &str) -> bool {
@@ -117,32 +146,92 @@ fn parse(v: &str) -> (u32, u32, u32) {
 
 pub fn apply(pending: &Pending) -> Event {
     match &pending.msi_url {
-        Some(url) => match download_and_install(url, &pending.version) {
+        Some(url) => match download_and_install(url, &pending.version, pending.msi_sha256.as_deref()) {
             Ok(()) => Event::Installing,
             Err(e) => Event::Failed(e),
         },
         None => {
-            let _ = webbrowser::open(&pending.page_url);
+            if pending.page_url.starts_with("https://github.com/ProAle9710/") {
+                let _ = webbrowser::open(&pending.page_url);
+            }
             Event::Done
         }
     }
 }
 
-fn download_and_install(url: &str, version: &str) -> Result<(), String> {
+fn download_and_install(url: &str, version: &str, expect_sha: Option<&str>) -> Result<(), String> {
+    if !allowed_msi_url(url) {
+        return Err("URL de MSI no permitida".into());
+    }
+    let expect = expect_sha.ok_or_else(|| "el release no trae sha256".to_string())?;
     let resp = ureq::get(url)
-        .set("User-Agent", &format!("JavaCraft/{version}"))
+        .set("User-Agent", &format!("EngineerCraft/{version}"))
         .call()
         .map_err(|e| e.to_string())?;
+    let mut body = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut body)
+        .map_err(|e| e.to_string())?;
+    const OLE: &[u8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1";
+    if body.len() < 8 || &body[..8] != OLE {
+        return Err("el archivo no es un MSI".into());
+    }
+    let got = hex_sha256(&body);
+    if got != expect {
+        return Err("hash SHA-256 del MSI no coincide".into());
+    }
     let path = msi_path(version)?;
-    let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-    std::io::copy(&mut resp.into_reader(), &mut file).map_err(|e| e.to_string())?;
-    drop(file);
+    std::fs::write(&path, &body).map_err(|e| e.to_string())?;
+    reject_bad_authenticode(&path)?;
     launch_msi(&path)
 }
 
+fn hex_sha256(data: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn msi_path(version: &str) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir();
-    Ok(dir.join(format!("EngineerCraft-{version}.msi")))
+    let ver: String = version
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+        .collect();
+    if ver.is_empty() {
+        return Err("versión inválida".into());
+    }
+    Ok(std::env::temp_dir().join(format!("EngineerCraft-{ver}-{}.msi", std::process::id())))
+}
+
+#[cfg(windows)]
+fn reject_bad_authenticode(path: &std::path::Path) -> Result<(), String> {
+    let Some(s) = path.to_str() else {
+        return Ok(());
+    };
+    let mut cmd = std::process::Command::new("powershell");
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-AuthenticodeSignature -FilePath '{}').Status", s.replace('\'', "''")),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if status == "HashMismatch" || status == "UnknownError" {
+        return Err(format!("firma Authenticode inválida: {status}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn reject_bad_authenticode(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(windows)]

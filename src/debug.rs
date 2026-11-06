@@ -29,11 +29,24 @@ pub enum Event {
 pub fn start(
     source: String,
     prefix_newlines: usize,
+    lang: crate::codelang::CodeLang,
     cmd_rx: Receiver<Cmd>,
     ev_tx: Sender<Event>,
 ) {
     thread::spawn(move || {
-        if let Err(message) = session(&source, prefix_newlines, &cmd_rx, &ev_tx) {
+        let result = match lang {
+            crate::codelang::CodeLang::Python => {
+                session_python(&source, prefix_newlines, &cmd_rx, &ev_tx)
+            }
+            crate::codelang::CodeLang::CSharp => {
+                let src = crate::transpile::cs_to_java(&source);
+                session(&src, prefix_newlines, &cmd_rx, &ev_tx)
+            }
+            crate::codelang::CodeLang::Java => {
+                session(&source, prefix_newlines, &cmd_rx, &ev_tx)
+            }
+        };
+        if let Err(message) = result {
             let _ = ev_tx.send(Event::Failed { message });
         }
     });
@@ -45,7 +58,8 @@ fn session(
     cmd_rx: &Receiver<Cmd>,
     ev_tx: &Sender<Event>,
 ) -> Result<(), String> {
-    let dir = prepare(source)?;
+    let work = prepare(source)?;
+    let dir = work.path.clone();
     let mut dbg = spawn_debuggee(&dir)?;
     let port = match wait_port(&dbg.port_rx, Duration::from_secs(8)) {
         Ok(p) => p,
@@ -144,6 +158,16 @@ fn emit_pause(
     ev_tx: &Sender<Event>,
 ) -> Option<usize> {
     let full = parse_line(blob).unwrap_or(prefix_newlines + 1);
+    send_pause(full, locals, prefix_newlines, prev_full, ev_tx)
+}
+
+fn send_pause(
+    full: usize,
+    locals: Vec<(String, String)>,
+    prefix_newlines: usize,
+    prev_full: Option<usize>,
+    ev_tx: &Sender<Event>,
+) -> Option<usize> {
     let line = map_line(full, prefix_newlines);
     let exec_line = prev_full.map(|p| map_line(p, prefix_newlines));
     let _ = ev_tx.send(Event::Paused {
@@ -154,11 +178,12 @@ fn emit_pause(
     Some(full)
 }
 
-fn prepare(source: &str) -> Result<PathBuf, String> {
+fn prepare(source: &str) -> Result<runner::TempWork, String> {
     match runner::compile_debug(source) {
-        runner::CompileStatus::Ok => Ok(std::env::temp_dir().join("engineercraft-debug")),
-        runner::CompileStatus::NoJdk => Err("No encuentro JDK / jdb.".into()),
-        runner::CompileStatus::Errors(errors) => {
+        Ok(work) => Ok(work),
+        Err(runner::CompileStatus::NoJdk) => Err("No encuentro JDK / jdb.".into()),
+        Err(runner::CompileStatus::Ok) => Err("No pude preparar el debug.".into()),
+        Err(runner::CompileStatus::Errors(errors)) => {
             let msg = errors
                 .iter()
                 .map(|e| format!("Línea {}: {}", e.line, e.message))
@@ -187,8 +212,8 @@ struct Jdb {
 
 fn spawn_debuggee(dir: &PathBuf) -> Result<Debuggee, String> {
     let mut cmd = Command::new("java");
-    cmd.current_dir(dir)
-        .args([
+    runner::harden(&mut cmd, dir);
+    cmd.args([
             "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0",
             "-Dfile.encoding=UTF-8",
             "Starter",
@@ -480,6 +505,224 @@ fn hide_window(cmd: &mut Command) {
     }
 }
 
+// ---------- Python (bdb) ----------
+
+enum PyEvt {
+    Pause { full: usize, locals: Vec<(String, String)> },
+    Ended,
+}
+
+fn session_python(
+    source: &str,
+    prefix_newlines: usize,
+    cmd_rx: &Receiver<Cmd>,
+    ev_tx: &Sender<Event>,
+) -> Result<(), String> {
+    let Some((bin, extra)) = crate::codelang::python_invocation() else {
+        return Err("No encuentro Python 3.".into());
+    };
+    let work = runner::TempWork::create().map_err(|e| e.to_string())?;
+    std::fs::write(work.path.join("Starter.py"), source)
+        .map_err(|e| format!("No pude escribir Starter.py: {e}"))?;
+    std::fs::write(work.path.join("_ecdbg.py"), PY_HARNESS)
+        .map_err(|e| format!("No pude escribir el depurador: {e}"))?;
+
+    let mut cmd = Command::new(&bin);
+    runner::harden(&mut cmd, &work.path);
+    for a in &extra {
+        cmd.arg(a);
+    }
+    cmd.args(["-I", "-X", "utf8", "_ecdbg.py", "Starter.py"])
+        .env("PYTHONIOENCODING", "utf-8")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_window(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("No pude lanzar python: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("python sin stdin")?;
+    let (proto_tx, proto_rx) = mpsc::channel();
+    let (prog_tx, prog_rx) = mpsc::channel();
+    if let Some(err) = child.stderr.take() {
+        thread::spawn(move || pump(err, None, proto_tx));
+    }
+    if let Some(out) = child.stdout.take() {
+        thread::spawn(move || pump(out, None, prog_tx));
+    }
+
+    let mut acc = String::new();
+    let mut tail = String::new();
+    let mut prev_full = match py_next(&proto_rx, &mut acc, &mut tail, Duration::from_secs(10))? {
+        PyEvt::Pause { full, locals } => send_pause(full, locals, prefix_newlines, None, ev_tx),
+        PyEvt::Ended => {
+            let _ = ev_tx.send(Event::Ended {
+                output: py_output(&prog_rx, &tail),
+            });
+            let _ = child.wait();
+            return Ok(());
+        }
+    };
+
+    loop {
+        match cmd_rx.recv_timeout(Duration::from_millis(150)) {
+            Ok(Cmd::Stop) => {
+                let _ = send(&mut stdin, "stop");
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(());
+            }
+            Ok(Cmd::Step) => {
+                let _ = send(&mut stdin, "next");
+                match py_next(&proto_rx, &mut acc, &mut tail, Duration::from_secs(8))? {
+                    PyEvt::Pause { full, locals } => {
+                        prev_full = send_pause(full, locals, prefix_newlines, prev_full, ev_tx);
+                    }
+                    PyEvt::Ended => {
+                        let _ = ev_tx.send(Event::Ended {
+                            output: py_output(&prog_rx, &tail),
+                        });
+                        let _ = child.wait();
+                        return Ok(());
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if let Ok(Some(_)) = child.try_wait() {
+                    let _ = ev_tx.send(Event::Ended {
+                        output: py_output(&prog_rx, &tail),
+                    });
+                    let _ = child.wait();
+                    return Ok(());
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = send(&mut stdin, "stop");
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn py_next(
+    rx: &Receiver<String>,
+    acc: &mut String,
+    tail: &mut String,
+    timeout: Duration,
+) -> Result<PyEvt, String> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        while let Some(pos) = acc.find('\n') {
+            let line = acc[..pos].trim_end_matches('\r').to_string();
+            acc.drain(..=pos);
+            if let Some(rest) = line.strip_prefix("@@PAUSE ") {
+                let (n, js) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                let full = n.trim().parse().unwrap_or(1);
+                return Ok(PyEvt::Pause {
+                    full,
+                    locals: parse_py_locals(js),
+                });
+            }
+            if line.starts_with("@@END") {
+                return Ok(PyEvt::Ended);
+            }
+            if let Some(rest) = line.strip_prefix("@@ERR ") {
+                let (n, msg) = rest.split_once(' ').unwrap_or(("1", rest));
+                return Err(format!("Línea {}: {}", n.trim(), msg.trim()));
+            }
+            tail.push_str(&line);
+            tail.push('\n');
+        }
+        match rx.recv_timeout(Duration::from_millis(60)) {
+            Ok(chunk) => acc.push_str(&chunk),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                tail.push_str(acc);
+                acc.clear();
+                return Ok(PyEvt::Ended);
+            }
+        }
+    }
+    Err(format!(
+        "El depurador no respondió a tiempo.\n{}",
+        tail.trim()
+    ))
+}
+
+fn parse_py_locals(js: &str) -> Vec<(String, String)> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(js) else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("?").to_string()))
+        .collect()
+}
+
+fn py_output(prog_rx: &Receiver<String>, tail: &str) -> String {
+    format!("{}{}", drain_program(prog_rx), tail)
+}
+
+const PY_HARNESS: &str = r#"import bdb
+import json
+import os
+import sys
+import traceback
+
+
+class Stepper(bdb.Bdb):
+    def __init__(self, target):
+        bdb.Bdb.__init__(self)
+        self.target = target
+        self.done = False
+
+    def user_line(self, frame):
+        if self.done:
+            raise bdb.BdbQuit
+        if frame.f_code.co_filename != self.target:
+            self.set_step()
+            return
+        loc = {}
+        for k, v in frame.f_locals.items():
+            if k.startswith("__"):
+                continue
+            try:
+                loc[k] = repr(v)
+            except Exception:
+                loc[k] = "?"
+        sys.stderr.write("@@PAUSE %d %s\n" % (frame.f_lineno, json.dumps(loc)))
+        sys.stderr.flush()
+        cmd = sys.stdin.readline().strip()
+        if cmd != "next":
+            self.done = True
+            raise bdb.BdbQuit
+        self.set_step()
+
+
+def main():
+    target = os.path.abspath(sys.argv[1])
+    globs = {"__name__": "__main__", "__file__": target}
+    try:
+        src = open(target, encoding="utf-8").read()
+        code = compile(src, target, "exec")
+    except SyntaxError as e:
+        sys.stderr.write("@@ERR %s %s\n" % (e.lineno or 1, e.msg))
+        sys.stderr.flush()
+        return
+    d = Stepper(target)
+    d.set_step()
+    try:
+        d.runctx("exec(_code)", {"_code": code}, globs)
+    except bdb.BdbQuit:
+        pass
+    except Exception:
+        traceback.print_exc()
+    sys.stderr.write("@@END\n")
+    sys.stderr.flush()
+
+
+main()
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,11 +740,71 @@ public class Starter {
 "#;
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (ev_tx, ev_rx) = mpsc::channel();
-        start(src.into(), 3, cmd_rx, ev_tx);
+        start(src.into(), 3, crate::codelang::CodeLang::Java, cmd_rx, ev_tx);
         let ev = ev_rx.recv_timeout(Duration::from_secs(15)).expect("no debug event");
         match ev {
             Event::Paused { line, .. } => {
                 assert!(line >= 1, "line={line}");
+                let _ = cmd_tx.send(Cmd::Stop);
+            }
+            Event::Failed { message } => panic!("failed: {message}"),
+            Event::Ended { output } => panic!("ended early: {output}"),
+        }
+    }
+
+    #[test]
+    fn jdwp_can_pause_csharp() {
+        let src = r#"
+using System;
+
+class Starter {
+    static void Main(string[] args) {
+        int x = 1;
+        string name = "Ana";
+        Console.WriteLine(name);
+    }
+}
+"#;
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (ev_tx, ev_rx) = mpsc::channel();
+        start(
+            src.into(),
+            3,
+            crate::codelang::CodeLang::CSharp,
+            cmd_rx,
+            ev_tx,
+        );
+        let ev = ev_rx.recv_timeout(Duration::from_secs(15)).expect("no debug event");
+        match ev {
+            Event::Paused { line, .. } => {
+                assert!(line >= 1, "line={line}");
+                let _ = cmd_tx.send(Cmd::Stop);
+            }
+            Event::Failed { message } => panic!("failed: {message}"),
+            Event::Ended { output } => panic!("ended early: {output}"),
+        }
+    }
+
+    #[test]
+    fn bdb_can_pause_python() {
+        if crate::codelang::python_invocation().is_none() {
+            return;
+        }
+        let src = "x = 1\nname = \"Ana\"\nprint(name)\n";
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (ev_tx, ev_rx) = mpsc::channel();
+        start(
+            src.into(),
+            0,
+            crate::codelang::CodeLang::Python,
+            cmd_rx,
+            ev_tx,
+        );
+        let ev = ev_rx.recv_timeout(Duration::from_secs(15)).expect("no debug event");
+        match ev {
+            Event::Paused { line, locals, .. } => {
+                assert_eq!(line, 1, "line={line}");
+                assert!(locals.is_empty() || locals.iter().all(|(k, _)| !k.is_empty()));
                 let _ = cmd_tx.send(Cmd::Stop);
             }
             Event::Failed { message } => panic!("failed: {message}"),

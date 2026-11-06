@@ -13,8 +13,8 @@ use crate::update;
 use eframe::egui::text::{CCursor, CCursorRange, LayoutJob};
 use eframe::egui::text_edit::TextEditState;
 use eframe::egui::{
-    self, Color32, Context, FontFamily, FontId, Frame, Key, Label, Margin, Modifiers, Pos2,
-    RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
+    self, Color32, Context, FontFamily, FontId, Frame, Key, Label, LayerId, Margin, Modifiers,
+    Order, Pos2, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
 };
 use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -70,6 +70,8 @@ pub struct EngineerCraft {
     lint_gen: u64,
     linting: bool,
     dirty_at: Option<Instant>,
+    saved_at: Option<Instant>,
+    window_focused: bool,
     completions: Vec<Completion>,
     completion_open: bool,
     completion_sel: usize,
@@ -100,6 +102,7 @@ pub struct EngineerCraft {
     full_file: bool,
     theme_anim: Option<ThemeAnim>,
     show_news: bool,
+    show_settings: bool,
 }
 
 struct ThemeAnim {
@@ -188,6 +191,8 @@ impl EngineerCraft {
             lint_gen: 0,
             linting: false,
             dirty_at: Some(Instant::now()),
+            saved_at: None,
+            window_focused: true,
             completions: Vec::new(),
             completion_open: false,
             completion_sel: 0,
@@ -207,9 +212,9 @@ impl EngineerCraft {
             debug_hist_open: Vec::new(),
             debug_busy: false,
             practice_hint: if full_file {
-                tr(lang, "Archivo completo (Starter.java). CORRER muestra la consola.", "Full file (Starter.java). RUN shows the console.").into()
+                code_lang.file_hint(lang)
             } else {
-                tr(lang, "Escribe debajo del TODO, indentado dentro de main.", "Write below the TODO, indented inside main.").into()
+                code_lang.todo_hint(lang).into()
             },
             snap_line: None,
             lang,
@@ -222,6 +227,7 @@ impl EngineerCraft {
             full_file,
             theme_anim: None,
             show_news,
+            show_settings: false,
         }
     }
 
@@ -315,24 +321,14 @@ impl EngineerCraft {
             self.full_file = true;
             self.show_result = true;
             self.cursor_bytes = self.cursor_bytes.saturating_add(prefix_len);
-            self.practice_hint = tr(
-                self.lang,
-                "Archivo completo (Starter.java). CORRER muestra la consola.",
-                "Full file (Starter.java). RUN shows the console.",
-            )
-            .into();
+            self.practice_hint = self.code_lang.file_hint(self.lang);
         } else {
             if let Some(ex) = self.current() {
                 self.code = catalog::body_of(ex, &self.code);
             }
             self.full_file = false;
             self.cursor_bytes = self.cursor_bytes.saturating_sub(prefix_len).min(self.code.len());
-            self.practice_hint = tr(
-                self.lang,
-                "Escribe debajo del TODO, indentado dentro de main.",
-                "Write below the TODO, indented inside main.",
-            )
-            .into();
+            self.practice_hint = self.code_lang.todo_hint(self.lang).into();
         }
         self.progress.full_file = self.full_file;
         self.pending_cursor = Some(self.cursor_bytes.min(self.code.len()));
@@ -415,6 +411,175 @@ impl EngineerCraft {
             .show(ctx, |ui| {
                 ui.painter().circle_filled(anim.origin, r, fill);
             });
+    }
+
+    fn suggested_zoom(ctx: &Context) -> f32 {
+        let w = ctx.input(|i| i.screen_rect.width()) * ctx.zoom_factor();
+        if w >= 3000.0 {
+            1.6
+        } else if w >= 2400.0 {
+            1.4
+        } else if w >= 1900.0 {
+            1.22
+        } else {
+            1.0
+        }
+    }
+
+    fn effective_zoom(&self, ctx: &Context) -> f32 {
+        if self.progress.ui_zoom >= 0.5 {
+            self.progress.ui_zoom.clamp(0.75, 2.0)
+        } else {
+            Self::suggested_zoom(ctx)
+        }
+    }
+
+    fn apply_zoom(&self, ctx: &Context) {
+        let z = self.effective_zoom(ctx);
+        if (ctx.zoom_factor() - z).abs() > 0.02 {
+            ctx.set_zoom_factor(z);
+        }
+    }
+
+    fn settings_overlay(&mut self, ctx: &Context) {
+        if !self.show_settings {
+            return;
+        }
+        let lang = self.lang;
+        let auto = self.progress.ui_zoom < 0.5;
+        let suggested = Self::suggested_zoom(ctx);
+        let mut close = false;
+        let mut save = false;
+        egui::Window::new(tr(lang, "AJUSTES", "SETTINGS"))
+            .id(egui::Id::new("settings_win"))
+            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 72.0])
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(false)
+            .frame(
+                Frame::NONE
+                    .fill(pal().panel)
+                    .stroke(hair(pal().accent))
+                    .inner_margin(Margin::same(18)),
+            )
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.label(
+                    RichText::new(tr(lang, "AJUSTES", "SETTINGS"))
+                        .monospace()
+                        .size(10.0)
+                        .color(pal().accent),
+                );
+                ui.label(
+                    RichText::new(tr(
+                        lang,
+                        "Escala y tipografía",
+                        "Scale and type",
+                    ))
+                    .font(FontId::new(18.0, theme::display_family()))
+                    .color(pal().text),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(tr(
+                        lang,
+                        "En pantallas 2K/4K sube la escala para que botones y paneles no queden diminutos.",
+                        "On 2K/4K displays raise the scale so controls are not tiny.",
+                    ))
+                    .size(13.0)
+                    .color(pal().dim),
+                );
+                ui.add_space(12.0);
+                let mut auto_on = auto;
+                if ui
+                    .checkbox(
+                        &mut auto_on,
+                        tr(lang, "Escala automática (resolución)", "Auto scale (resolution)"),
+                    )
+                    .changed()
+                {
+                    self.progress.ui_zoom = if auto_on { 0.0 } else { suggested };
+                    save = true;
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(tr(lang, "Escala de la interfaz", "UI scale"))
+                        .monospace()
+                        .size(11.0)
+                        .color(pal().muted),
+                );
+                let mut zoom = if auto { suggested } else { self.progress.ui_zoom };
+                if ui
+                    .add(egui::Slider::new(&mut zoom, 0.85..=1.85).text("×"))
+                    .changed()
+                {
+                    self.progress.ui_zoom = zoom;
+                    save = true;
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "{} {suggested:.2}×",
+                        tr(lang, "Sugerido para esta pantalla:", "Suggested for this screen:")
+                    ))
+                    .size(12.0)
+                    .color(pal().dim),
+                );
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new(tr(lang, "Tamaño de fuente del editor", "Editor font size"))
+                        .monospace()
+                        .size(11.0)
+                        .color(pal().muted),
+                );
+                let mut fs = self.progress.font_size;
+                if ui
+                    .add(egui::Slider::new(&mut fs, 11.0..=24.0).suffix(" pt"))
+                    .changed()
+                {
+                    self.progress.font_size = fs;
+                    save = true;
+                }
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(tr(lang, "RESTAURAR TAMAÑOS", "RESET SIZES"))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(pal().text),
+                            )
+                            .stroke(hair(pal().line)),
+                        )
+                        .clicked()
+                    {
+                        self.progress.ui_zoom = 0.0;
+                        self.progress.font_size = 13.5;
+                        save = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(tr(lang, "CERRAR", "CLOSE"))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(pal().bg),
+                            )
+                            .fill(pal().accent),
+                        )
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+            });
+        if save {
+            self.progress.save();
+        }
+        if close {
+            self.show_settings = false;
+        }
     }
 
     fn dismiss_news(&mut self) {
@@ -588,7 +753,7 @@ impl EngineerCraft {
         self.code = i18n::translate_comments(&self.code, to);
         self.progress.lang = to.as_saved().into();
         self.progress.save();
-        self.practice_hint = practice::hint_at(&self.code, self.cursor_bytes, to);
+        self.practice_hint = practice::hint_at(&self.code, self.cursor_bytes, to, self.code_lang);
         if matches!(self.console_kind, ConsoleKind::Idle) {
             self.console = tr(
                 to,
@@ -695,19 +860,9 @@ impl EngineerCraft {
         self.pending_cursor = Some(practice::first_write_cursor(&self.code));
         if self.advanced() {
             self.show_result = true;
-            self.practice_hint = tr(
-                self.lang,
-                "Archivo completo (Starter.java). CORRER muestra la consola.",
-                "Full file (Starter.java). RUN shows the console.",
-            )
-            .into();
+            self.practice_hint = self.code_lang.file_hint(self.lang);
         } else {
-            self.practice_hint = tr(
-                self.lang,
-                "Escribe debajo del TODO, indentado dentro de main.",
-                "Write below the TODO, indented inside main.",
-            )
-            .into();
+            self.practice_hint = self.code_lang.todo_hint(self.lang).into();
         }
         self.mark_dirty();
     }
@@ -765,16 +920,6 @@ impl EngineerCraft {
         if self.running {
             return;
         }
-        if self.code_lang != CodeLang::Java {
-            self.console_kind = ConsoleKind::Err;
-            self.console = tr(
-                self.lang,
-                "El paso a paso (jdb) solo está en Java.",
-                "Step-debug (jdb) is Java-only.",
-            )
-            .into();
-            return;
-        }
         self.persist_draft();
         self.stop_debug();
         self.show_result = true;
@@ -799,7 +944,7 @@ impl EngineerCraft {
         let (ev_tx, ev_rx) = mpsc::channel();
         self.debug_tx = Some(cmd_tx);
         self.debug_rx = Some(ev_rx);
-        debug::start(source, prefix, cmd_rx, ev_tx);
+        debug::start(source, prefix, self.code_lang, cmd_rx, ev_tx);
     }
 
     fn debug_step(&mut self) {
@@ -1148,6 +1293,25 @@ impl EngineerCraft {
         self.dirty_at = Some(Instant::now());
     }
 
+    fn poll_autosave(&mut self, ctx: &Context) {
+        let focused = ctx.input(|i| i.focused);
+        let lost_focus = self.window_focused && !focused;
+        self.window_focused = focused;
+        let due = self.dirty_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(600));
+        let unsaved = match (self.dirty_at, self.saved_at) {
+            (Some(d), Some(s)) => d > s,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if lost_focus || (due && unsaved) {
+            self.persist_draft();
+            self.saved_at = Some(Instant::now());
+        }
+        if unsaved {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+    }
+
     fn poll_lint(&mut self, ctx: &Context) {
         while let Ok((gen, errors)) = self.lint_rx.try_recv() {
             if gen != self.lint_gen {
@@ -1159,11 +1323,13 @@ impl EngineerCraft {
             }
             let errors = self.remap_diags(errors);
             self.set_error_lines(&errors);
-            if !self.show_result || matches!(self.console_kind, ConsoleKind::Debug) {
+            if matches!(self.console_kind, ConsoleKind::Debug) {
                 continue;
             }
             if errors.is_empty() {
-                self.error_cards.clear();
+                if !self.running {
+                    self.error_cards.clear();
+                }
             } else {
                 self.error_cards = errors;
             }
@@ -1206,10 +1372,24 @@ impl EngineerCraft {
         match outcome {
             Outcome::NoJdk => {
                 self.console_kind = ConsoleKind::Err;
-                self.console = tr(self.lang, "No encuentro javac/java", "Cannot find javac/java").into();
+                let (msg, extra) = match self.code_lang {
+                    CodeLang::Python => (
+                        tr(self.lang, "No encuentro Python", "Cannot find Python"),
+                        "Instala Python 3 y pulsa AJUSTES o YA LO INSTALÉ.",
+                    ),
+                    CodeLang::CSharp => (
+                        tr(self.lang, "No encuentro el SDK de .NET", "Cannot find the .NET SDK"),
+                        "Instala .NET SDK y pulsa YA LO INSTALÉ.",
+                    ),
+                    CodeLang::Java => (
+                        tr(self.lang, "No encuentro javac/java", "Cannot find javac/java"),
+                        "Instala un JDK y reinicia EngineerCraft.",
+                    ),
+                };
+                self.console = msg.into();
                 self.error_cards = vec![Diag {
                     line: 1,
-                    message: "Instala un JDK y reinicia EngineerCraft.".into(),
+                    message: extra.into(),
                     extra: String::new(),
                 }];
                 self.output_lines.clear();
@@ -1228,11 +1408,10 @@ impl EngineerCraft {
                 self.error_lines = line.into_iter().collect();
                 self.error_line = line;
                 self.console = tr(self.lang, "Falló al ejecutar", "Runtime error").into();
-                let extra = runner::explain(&message).to_string();
                 self.error_cards = vec![Diag {
                     line: line.unwrap_or(1),
                     message,
-                    extra,
+                    extra: String::new(),
                 }];
                 self.output_lines = stdout_lines(&stdout);
             }
@@ -1364,7 +1543,7 @@ impl EngineerCraft {
     }
 
     fn open_completions(&mut self) {
-        let prefix = complete::current_prefix(&self.code, self.cursor_bytes);
+        let prefix = complete::current_prefix(&self.code, self.cursor_bytes, self.code_lang);
         self.completion_start = prefix.start;
         self.completions = complete::matching_forced(&prefix, &self.code, self.lang, self.code_lang);
         self.completion_open = !self.completions.is_empty();
@@ -1372,7 +1551,7 @@ impl EngineerCraft {
     }
 
     fn refresh_completions(&mut self) {
-        let prefix = complete::current_prefix(&self.code, self.cursor_bytes);
+        let prefix = complete::current_prefix(&self.code, self.cursor_bytes, self.code_lang);
         self.completion_start = prefix.start;
         if prefix.text.is_empty() && !prefix.after_dot {
             self.completion_open = false;
@@ -1407,6 +1586,8 @@ impl eframe::App for EngineerCraft {
         self.handle_keys(ctx);
         self.tick_lang(ctx);
         self.tick_theme(ctx);
+        self.apply_zoom(ctx);
+        self.poll_autosave(ctx);
 
         let bg = self.canvas_bg();
         egui::TopBottomPanel::top("top_bar")
@@ -1448,6 +1629,7 @@ impl eframe::App for EngineerCraft {
         self.lang_overlay(ctx);
         self.theme_overlay(ctx);
         self.news_overlay(ctx);
+        self.settings_overlay(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1468,9 +1650,9 @@ impl EngineerCraft {
         let ratio = done as f32 / total as f32;
 
         Frame::NONE
-            .inner_margin(Margin::symmetric(20, 12))
+            .inner_margin(Margin::symmetric(16, 10))
             .show(ui, |ui| {
-                ui.set_min_height(72.0);
+                ui.spacing_mut().button_padding = Vec2::new(8.0, 4.0);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
@@ -1500,7 +1682,7 @@ impl EngineerCraft {
                             {
                                 self.show_news = true;
                             }
-                            ui.add_space(10.0);
+                            ui.add_space(8.0);
                             ui.add(
                                 egui::Hyperlink::from_label_and_url(
                                     RichText::new("GitHub ↗")
@@ -1540,20 +1722,19 @@ impl EngineerCraft {
                         });
                         self.medal_row(ui);
                     });
-
-                    ui.add_space(24.0);
+                    ui.add_space(16.0);
                     ui.vertical(|ui| {
-                        ui.add_space(10.0);
+                        ui.add_space(8.0);
                         ui.label(
                             RichText::new(format!(
                                 "{done:02} / {total:02}  {}",
                                 tr(lang, "COMPLETADOS", "DONE")
                             ))
-                                .monospace()
-                                .size(11.0)
-                                .color(pal().dim),
+                            .monospace()
+                            .size(11.0)
+                            .color(pal().dim),
                         );
-                        let bar = ui.available_width().min(280.0);
+                        let bar = ui.available_width().min(220.0);
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::new(bar, 3.0), Sense::hover());
                         ui.painter().rect_filled(rect, 0.0, pal().accent_dim);
@@ -1561,7 +1742,6 @@ impl EngineerCraft {
                         fill.set_width(rect.width() * ratio);
                         ui.painter().rect_filled(fill, 0.0, pal().accent);
                     });
-
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let dark = pal().dark;
                         let theme_resp = theme_icon_button(ui, dark);
@@ -1575,25 +1755,44 @@ impl EngineerCraft {
                         {
                             self.set_dark(ui.ctx(), !dark);
                         }
-                        ui.add_space(10.0);
-                        let jdk = self
+                        ui.add_space(8.0);
+                        let tool = self
                             .jdk
                             .as_ref()
                             .map(|t| t.label.clone())
                             .unwrap_or_else(|| {
-                                format!(
-                                    "{} {}",
-                                    self.code_lang.label(),
-                                    tr(lang, "no encontrado", "not found")
-                                )
+                                tr(lang, "sin toolchain", "no toolchain").into()
                             });
                         ui.label(
-                            RichText::new(jdk)
+                            RichText::new(tool)
                                 .monospace()
                                 .size(11.0)
                                 .color(if self.jdk.is_some() { pal().ok } else { pal().err }),
                         );
                         ui.add_space(8.0);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(tr(lang, "AJUSTES", "SETTINGS"))
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(pal().text),
+                                )
+                                .fill(if self.show_settings {
+                                    pal().accent_dim
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .stroke(hair(pal().accent)),
+                            )
+                            .clicked()
+                        {
+                            self.show_settings = !self.show_settings;
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
                         for cl in CodeLang::ALL {
                             let on = self.code_lang == cl;
                             if ui
@@ -1746,7 +1945,6 @@ impl EngineerCraft {
                         {
                             self.reset_starter();
                         }
-                    });
                 });
             });
     }
@@ -1957,7 +2155,7 @@ impl EngineerCraft {
                 );
                 ui.add_space(6.0);
 
-                let font = FontId::monospace(13.5);
+                let font = FontId::monospace(self.progress.font_size.clamp(11.0, 28.0));
                 let font_layout = font.clone();
                 let error_lines = self.error_lines.clone();
                 let debug_line = self.debug_line;
@@ -2009,7 +2207,8 @@ impl EngineerCraft {
                                     },
                                 );
                             }
-                            ui.add(Label::new(nums).selectable(false));
+                            let gutter = ui.add(Label::new(nums).selectable(false).sense(Sense::click()));
+                            let rows = lines.max(24).max(1);
                             ui.add_space(8.0);
 
                             if let Some(byte) = self.pending_cursor.take() {
@@ -2050,9 +2249,16 @@ impl EngineerCraft {
                                         + Vec2::new(cursor_rect.left(), cursor_rect.bottom() + 4.0),
                                 );
                             }
+                            if self.completion_open && output.response.clicked() {
+                                self.refresh_completions();
+                            }
                             if output.response.changed() && !self.running {
                                 if let Some((next, cur)) =
-                                    crate::pair::autoclose(&self.code, self.cursor_bytes)
+                                    crate::pair::autoclose(
+                                        &self.code,
+                                        self.cursor_bytes,
+                                        self.code_lang,
+                                    )
                                 {
                                     self.code = next;
                                     self.cursor_bytes = cur;
@@ -2068,6 +2274,44 @@ impl EngineerCraft {
                                         "Code changed. Run again.",
                                     )
                                     .into();
+                                }
+                            }
+                            let pointer = ui.ctx().pointer_hover_pos();
+                            let editor_line = pointer.and_then(|pos| {
+                                if output.response.rect.contains(pos) {
+                                    line_at_galley(
+                                        output.galley.as_ref(),
+                                        output.galley_pos,
+                                        pos,
+                                        &self.code,
+                                    )
+                                } else {
+                                    None
+                                }
+                            });
+                            let gutter_line = pointer.and_then(|pos| {
+                                if gutter.rect.contains(pos) {
+                                    let h = gutter.rect.height() / rows as f32;
+                                    if h <= 0.5 {
+                                        return None;
+                                    }
+                                    let i = ((pos.y - gutter.rect.top()) / h).floor() as usize + 1;
+                                    Some(i.clamp(1, rows))
+                                } else {
+                                    None
+                                }
+                            });
+                            let hover_err = gutter_line.or(editor_line);
+                            if let Some(i) = hover_err {
+                                if let Some(msg) = compiler_msg(&self.error_cards, i) {
+                                    show_line_error(
+                                        ui,
+                                        output.galley.as_ref(),
+                                        output.galley_pos,
+                                        &self.code,
+                                        i,
+                                        msg,
+                                    );
                                 }
                             }
                             if self.debug_line.is_some() {
@@ -2086,6 +2330,7 @@ impl EngineerCraft {
                                         &self.code,
                                         self.cursor_bytes,
                                         self.lang,
+                                        self.code_lang,
                                     );
                                     self.practice_hint = g.hint;
                                     if g.code != self.code {
@@ -2106,6 +2351,7 @@ impl EngineerCraft {
                                         &self.code,
                                         self.cursor_bytes,
                                         self.lang,
+                                        self.code_lang,
                                     );
                                     self.practice_hint = g.hint;
                                     if g.code != self.code {
@@ -2117,7 +2363,12 @@ impl EngineerCraft {
                                     }
                                 } else {
                                     self.practice_hint =
-                                        practice::hint_at(&self.code, self.cursor_bytes, self.lang);
+                                        practice::hint_at(
+                                            &self.code,
+                                            self.cursor_bytes,
+                                            self.lang,
+                                            self.code_lang,
+                                        );
                                 }
                             }
                         });
@@ -2198,13 +2449,8 @@ impl EngineerCraft {
                                         )
                                         .wrap(),
                                     );
-                                    let hint = if card.extra.is_empty() {
-                                        runner::explain(&card.message).to_string()
-                                    } else {
-                                        card.extra.clone()
-                                    };
-                                    if !hint.is_empty() {
-                                        ui.label(RichText::new(hint).color(inv.dim).size(13.0));
+                                    if !card.extra.is_empty() {
+                                        ui.label(RichText::new(&card.extra).color(inv.dim).size(13.0));
                                     }
                                 });
                             ui.add_space(6.0);
@@ -2301,7 +2547,7 @@ impl EngineerCraft {
         }
         let Some(pos) = self.popup_pos else { return };
         let mut chosen = None;
-        egui::Area::new(egui::Id::new("completion_popup"))
+        let popup = egui::Area::new(egui::Id::new("completion_popup"))
             .fixed_pos(pos)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -2354,6 +2600,16 @@ impl EngineerCraft {
         if let Some(i) = chosen {
             self.completion_sel = i;
             self.accept_completion();
+            return;
+        }
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            if let Some(p) = ctx.pointer_latest_pos() {
+                if !popup.response.rect.expand(6.0).contains(p) {
+                    self.completion_open = false;
+                }
+            } else {
+                self.completion_open = false;
+            }
         }
     }
 }
@@ -2401,6 +2657,63 @@ fn exercise_row(
     }
     ui.data_mut(|d| d.insert_temp(id, resp.hovered()));
     resp
+}
+
+fn compiler_msg(cards: &[Diag], line: usize) -> Option<&str> {
+    cards.iter().find(|c| c.line == line).map(|c| c.message.as_str())
+}
+
+fn line_at_galley(galley: &egui::Galley, origin: Pos2, pos: Pos2, code: &str) -> Option<usize> {
+    let rel = pos - origin;
+    let n = code.lines().count().max(1);
+    for i in 1..=n {
+        let ch = code[..byte_at_line(code, i)].chars().count();
+        let r = galley.pos_from_cursor(CCursor::new(ch));
+        if rel.y >= r.top() && rel.y < r.bottom() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn show_line_error(
+    ui: &Ui,
+    galley: &egui::Galley,
+    origin: Pos2,
+    code: &str,
+    line: usize,
+    msg: &str,
+) {
+    let ch = code[..byte_at_line(code, line)].chars().count();
+    let r = galley.pos_from_cursor(CCursor::new(ch));
+    let pos = Pos2::new(origin.x, origin.y + r.bottom());
+    let inv = pal().opposite();
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = 460.0;
+    job.append(
+        &format!("Línea {line}\n"),
+        0.0,
+        egui::text::TextFormat {
+            font_id: FontId::monospace(11.0),
+            color: inv.err,
+            ..Default::default()
+        },
+    );
+    job.append(
+        msg,
+        0.0,
+        egui::text::TextFormat {
+            font_id: FontId::new(13.0, FontFamily::Proportional),
+            color: inv.text,
+            ..Default::default()
+        },
+    );
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let size = galley.size() + Vec2::new(20.0, 16.0);
+    let rect = egui::Rect::from_min_size(pos, size);
+    let painter = ui.ctx().layer_painter(LayerId::new(Order::Foreground, egui::Id::new("line_err")));
+    painter.rect_filled(rect, 0.0, inv.bg);
+    painter.galley(rect.min + Vec2::new(10.0, 6.0), galley, inv.text);
 }
 
 fn byte_at_line(code: &str, line: usize) -> usize {

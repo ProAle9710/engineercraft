@@ -15,12 +15,14 @@ pub const RELEASES: &[Release] = &[
             "Si falta JDK, .NET o Python: guía con winget/brew/apt y enlaces oficiales.",
             "Pasa a llamarse EngineerCraft (actualiza JavaCraft).",
             "Cierre automático de comillas y snippets if/for/while.",
+            "Paso a paso (F10) también en C# y Python, con watch de variables.",
         ],
         en: &[
             "Java / C# / Python switcher: same exercise in the other language.",
             "Missing JDK, .NET or Python: guide with winget/brew/apt and official links.",
             "Renamed EngineerCraft (upgrades JavaCraft).",
             "Auto-close quotes and if/for/while snippets.",
+            "Step debug (F10) now works in C# and Python too, with variable watch.",
         ],
     },
     Release {
