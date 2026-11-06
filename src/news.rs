@@ -9,6 +9,23 @@ pub struct Release {
 /// Añade un bloque arriba al publicar (versión = CARGO_PKG_VERSION).
 pub const RELEASES: &[Release] = &[
     Release {
+        version: "0.1.5",
+        es: &[
+            "SIMPLE / AVANZADO: archivo Java completo + consola real.",
+            "Tema claro/oscuro (icono sol/luna, esquina derecha).",
+            "Pantalla Novedades al actualizar (clic en la versión).",
+            "Autocomplete con explicación del método o tipo (Ctrl+Espacio).",
+            "Práctica libre y copiar comentarios en el editor.",
+        ],
+        en: &[
+            "SIMPLE / ADVANCED: full Java file + real console.",
+            "Light/dark theme (sun/moon, top-right).",
+            "What's New on update (click the version).",
+            "Autocomplete docs for methods and types (Ctrl+Space).",
+            "Free practice and copyable comments.",
+        ],
+    },
+    Release {
         version: "0.1.4",
         es: &[
             "SIMPLE / AVANZADO: archivo Java completo + consola real.",
