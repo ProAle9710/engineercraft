@@ -236,7 +236,11 @@ fn ensure_indent_at(code: &str, at: usize, indent: &str) -> (String, usize) {
     let mut next = String::new();
     next.push_str(&code[..line_start]);
     next.push_str(indent);
-    next.push_str(rest);
+    if rest.is_empty() {
+        next.push('\n');
+    } else {
+        next.push_str(rest);
+    }
     let cursor = line_start + indent.len();
     (next, cursor)
 }

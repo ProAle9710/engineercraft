@@ -9,6 +9,23 @@ pub struct Release {
 /// Añade un bloque arriba al publicar (versión = CARGO_PKG_VERSION).
 pub const RELEASES: &[Release] = &[
     Release {
+        version: "0.1.6",
+        es: &[
+            "Cierre automático de comillas, paréntesis y llaves.",
+            "Asignar String con = \" deja = \"\"; y el punto y coma.",
+            "Tab en if / for / while / switch: cursor entre paréntesis y bloque { }.",
+            "SIMPLE / AVANZADO: archivo Java completo + consola real.",
+            "Tema claro/oscuro y Novedades al actualizar.",
+        ],
+        en: &[
+            "Auto-close quotes, parentheses, and braces.",
+            "String assign = \" becomes = \"\"; with semicolon.",
+            "Tab on if / for / while / switch: caret in parens and { } block.",
+            "SIMPLE / ADVANCED: full Java file + real console.",
+            "Light/dark theme and What's New on update.",
+        ],
+    },
+    Release {
         version: "0.1.5",
         es: &[
             "SIMPLE / AVANZADO: archivo Java completo + consola real.",

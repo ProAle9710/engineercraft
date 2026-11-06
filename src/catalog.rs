@@ -213,7 +213,42 @@ pub fn assemble(ex: &Exercise, body: &str) -> String {
     if ex.is_free() {
         return body.to_string();
     }
-    format!("{}{}{}", ex.prefix, body, ex.suffix)
+    format!("{}{}{}", ex.prefix, glue_body(body), ex.suffix)
+}
+
+fn glue_body(body: &str) -> String {
+    let mut b = body.to_string();
+    while b.ends_with(' ') || b.ends_with('\t') {
+        b.pop();
+    }
+    if !b.ends_with('\n') {
+        b.push('\n');
+    }
+    b
+}
+
+/// Extrae el cuerpo sin tocar prefix/suffix originales (toggle Simple/Avanzado).
+pub fn body_of(ex: &Exercise, src: &str) -> String {
+    if ex.is_free() {
+        return src.to_string();
+    }
+    let src = src.replace("\r\n", "\n").replace('\r', "\n");
+    let prefix = ex.prefix.replace("\r\n", "\n");
+    let suffix = ex.suffix.replace("\r\n", "\n");
+    if let Some(rest) = src.strip_prefix(prefix.as_str()) {
+        if let Some(body) = rest.strip_suffix(suffix.as_str()) {
+            return body.to_string();
+        }
+        if let Some(at) = rest.find(suffix.as_str()) {
+            return rest[..at].to_string();
+        }
+        return rest.to_string();
+    }
+    if src.contains("public class") {
+        split_template(&src).1
+    } else {
+        src.to_string()
+    }
 }
 
 pub fn body_from_draft(ex: &Exercise, saved: Option<&String>) -> String {
@@ -222,7 +257,7 @@ pub fn body_from_draft(ex: &Exercise, saved: Option<&String>) -> String {
         return saved.cloned().unwrap_or_else(|| ex.body.clone());
     }
     match saved {
-        Some(s) if s.contains("public class") => split_template(s).1,
+        Some(s) if s.contains("public class") => body_of(ex, s),
         Some(s) => s.clone(),
         None => ex.body.clone(),
     }

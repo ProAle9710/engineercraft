@@ -8,6 +8,7 @@ mod highlight;
 mod i18n;
 mod markdown;
 mod news;
+mod pair;
 mod practice;
 mod progress;
 mod runner;

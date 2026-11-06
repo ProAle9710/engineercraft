@@ -297,14 +297,14 @@ impl JavaCraft {
             return;
         }
         self.stop_debug();
+        let prefix_len = self.current().map(|e| e.prefix.len()).unwrap_or(0);
         if on {
             if let Some(ex) = self.current() {
-                if !self.code.contains("public class") {
-                    self.code = catalog::assemble(ex, &self.code);
-                }
+                self.code = catalog::assemble(ex, &self.code);
             }
             self.full_file = true;
             self.show_result = true;
+            self.cursor_bytes = self.cursor_bytes.saturating_add(prefix_len);
             self.practice_hint = tr(
                 self.lang,
                 "Archivo completo (Starter.java). CORRER muestra la consola.",
@@ -312,19 +312,11 @@ impl JavaCraft {
             )
             .into();
         } else {
-            let src = self.code.clone();
-            if src.contains("public class") {
-                let (p, b, s) = catalog::split_template(&src);
-                if let Some(ex) = self.catalog.get_mut(self.selected) {
-                    if !p.is_empty() {
-                        ex.prefix_newlines = p.matches('\n').count();
-                        ex.prefix = p;
-                        ex.suffix = s;
-                    }
-                }
-                self.code = b;
+            if let Some(ex) = self.current() {
+                self.code = catalog::body_of(ex, &self.code);
             }
             self.full_file = false;
+            self.cursor_bytes = self.cursor_bytes.saturating_sub(prefix_len).min(self.code.len());
             self.practice_hint = tr(
                 self.lang,
                 "Escribe debajo del TODO, indentado dentro de main.",
@@ -333,10 +325,9 @@ impl JavaCraft {
             .into();
         }
         self.progress.full_file = self.full_file;
-        self.pending_cursor = Some(practice::first_write_cursor(&self.code));
-        self.snap_line = None;
+        self.pending_cursor = Some(self.cursor_bytes.min(self.code.len()));
+        self.snap_line = Some(practice::line_index(&self.code, self.cursor_bytes));
         self.persist_draft();
-        self.mark_dirty();
     }
 
     fn remap_diags(&self, errors: Vec<Diag>) -> Vec<Diag> {
@@ -508,10 +499,15 @@ impl JavaCraft {
         if let Some(ex) = self.current() {
             let id = ex.id.clone();
             let keep_empty = ex.is_free();
-            if self.code.trim().is_empty() && !keep_empty {
+            let text = if self.full_file && !keep_empty {
+                catalog::body_of(ex, &self.code)
+            } else {
+                self.code.clone()
+            };
+            if text.trim().is_empty() && !keep_empty {
                 self.progress.drafts.remove(&id);
             } else {
-                self.progress.drafts.insert(id, self.code.clone());
+                self.progress.drafts.insert(id, text);
             }
         }
         self.progress.save();
@@ -1851,6 +1847,13 @@ impl JavaCraft {
                                 );
                             }
                             if output.response.changed() && !self.running {
+                                if let Some((next, cur)) =
+                                    crate::pair::autoclose(&self.code, self.cursor_bytes)
+                                {
+                                    self.code = next;
+                                    self.cursor_bytes = cur;
+                                    self.pending_cursor = Some(cur);
+                                }
                                 self.refresh_completions();
                                 self.mark_dirty();
                                 if matches!(self.console_kind, ConsoleKind::Ok) {
