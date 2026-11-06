@@ -7,6 +7,7 @@ mod debug;
 mod highlight;
 mod i18n;
 mod markdown;
+mod news;
 mod practice;
 mod progress;
 mod runner;

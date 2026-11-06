@@ -7,10 +7,7 @@ use crate::markdown;
 use crate::practice;
 use crate::progress::Progress;
 use crate::runner::{self, Diag, Outcome};
-use crate::theme::{
-    self, hair, ACCENT, ACCENT_DIM, BG, BG_ERR, BG_OK, DIM, ERR, GRID, GRID_STRONG, LINE, MUTED, OK,
-    PANEL, PANEL_2, TEXT, WARN,
-};
+use crate::theme::{self, hair, pal};
 use crate::update;
 use eframe::egui::text::{CCursor, CCursorRange, LayoutJob};
 use eframe::egui::text_edit::TextEditState;
@@ -96,6 +93,16 @@ pub struct JavaCraft {
     update_pending: Option<update::Pending>,
     update_busy: bool,
     update_msg: Option<String>,
+    full_file: bool,
+    theme_anim: Option<ThemeAnim>,
+    show_news: bool,
+}
+
+struct ThemeAnim {
+    from: theme::Palette,
+    to: theme::Palette,
+    t: f32,
+    origin: Pos2,
 }
 
 struct LangAnim {
@@ -107,7 +114,6 @@ struct LangAnim {
 impl JavaCraft {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
-        theme::apply(&cc.egui_ctx);
 
         let (tx, rx) = mpsc::channel();
         let (lint_tx, lint_rx) = mpsc::channel();
@@ -126,6 +132,7 @@ impl JavaCraft {
             Err(e) => (Vec::new(), Some(e)),
         };
         let progress = Progress::load();
+        theme::apply(&cc.egui_ctx, theme::Palette::get(progress.dark));
         let lang = Lang::from_saved(&progress.lang);
         let selected = catalog
             .iter()
@@ -138,7 +145,16 @@ impl JavaCraft {
         if lang == Lang::Es {
             code = i18n::translate_comments(&code, Lang::Es);
         }
+        let full_file = progress.full_file;
+        if full_file {
+            if let Some(ex) = catalog.get(selected) {
+                if !ex.is_free() && !code.contains("public class") {
+                    code = catalog::assemble(ex, &code);
+                }
+            }
+        }
         let write_at = practice::first_write_cursor(&code);
+        let show_news = progress.last_seen_version != crate::version::APP_VERSION;
 
         Self {
             catalog,
@@ -170,7 +186,7 @@ impl JavaCraft {
             popup_pos: None,
             editor_id: egui::Id::new("java_editor"),
             pending_cursor: Some(write_at),
-            show_result: false,
+            show_result: full_file,
             debug_tx: None,
             debug_rx: None,
             debug_line: None,
@@ -180,7 +196,11 @@ impl JavaCraft {
             debug_watch_open: false,
             debug_hist_open: Vec::new(),
             debug_busy: false,
-            practice_hint: tr(lang, "Escribe debajo del TODO, indentado dentro de main.", "Write below the TODO, indented inside main.").into(),
+            practice_hint: if full_file {
+                tr(lang, "Archivo completo (Starter.java). CORRER muestra la consola.", "Full file (Starter.java). RUN shows the console.").into()
+            } else {
+                tr(lang, "Escribe debajo del TODO, indentado dentro de main.", "Write below the TODO, indented inside main.").into()
+            },
             snap_line: None,
             lang,
             lang_anim: None,
@@ -189,6 +209,9 @@ impl JavaCraft {
             update_pending: None,
             update_busy: false,
             update_msg: None,
+            full_file,
+            theme_anim: None,
+            show_news,
         }
     }
 
@@ -245,7 +268,14 @@ impl JavaCraft {
         self.current().is_some_and(|e| e.is_free())
     }
 
+    fn advanced(&self) -> bool {
+        self.is_free() || self.full_file
+    }
+
     fn full_source(&self) -> String {
+        if self.advanced() {
+            return self.code.clone();
+        }
         match self.current() {
             Some(ex) => catalog::assemble(ex, &self.code),
             None => self.code.clone(),
@@ -253,10 +283,60 @@ impl JavaCraft {
     }
 
     fn map_line(&self, full_line: usize) -> usize {
+        if self.advanced() {
+            return full_line.max(1);
+        }
         let off = self.current().map(|e| e.prefix_newlines).unwrap_or(0);
         let mapped = full_line.saturating_sub(off).max(1);
         let max = self.code.lines().count().max(1);
         mapped.min(max)
+    }
+
+    fn set_full_file(&mut self, on: bool) {
+        if self.is_free() || on == self.full_file {
+            return;
+        }
+        self.stop_debug();
+        if on {
+            if let Some(ex) = self.current() {
+                if !self.code.contains("public class") {
+                    self.code = catalog::assemble(ex, &self.code);
+                }
+            }
+            self.full_file = true;
+            self.show_result = true;
+            self.practice_hint = tr(
+                self.lang,
+                "Archivo completo (Starter.java). CORRER muestra la consola.",
+                "Full file (Starter.java). RUN shows the console.",
+            )
+            .into();
+        } else {
+            let src = self.code.clone();
+            if src.contains("public class") {
+                let (p, b, s) = catalog::split_template(&src);
+                if let Some(ex) = self.catalog.get_mut(self.selected) {
+                    if !p.is_empty() {
+                        ex.prefix_newlines = p.matches('\n').count();
+                        ex.prefix = p;
+                        ex.suffix = s;
+                    }
+                }
+                self.code = b;
+            }
+            self.full_file = false;
+            self.practice_hint = tr(
+                self.lang,
+                "Escribe debajo del TODO, indentado dentro de main.",
+                "Write below the TODO, indented inside main.",
+            )
+            .into();
+        }
+        self.progress.full_file = self.full_file;
+        self.pending_cursor = Some(practice::first_write_cursor(&self.code));
+        self.snap_line = None;
+        self.persist_draft();
+        self.mark_dirty();
     }
 
     fn remap_diags(&self, errors: Vec<Diag>) -> Vec<Diag> {
@@ -270,19 +350,165 @@ impl JavaCraft {
     }
 
     fn canvas_bg(&self) -> Color32 {
+        let p = pal();
         match self.console_kind {
-            ConsoleKind::Ok => BG_OK,
-            ConsoleKind::Err => BG_ERR,
-            ConsoleKind::Run => Color32::from_rgb(42, 36, 14),
-            ConsoleKind::Debug => Color32::from_rgb(36, 32, 16),
-            ConsoleKind::Idle => BG,
+            ConsoleKind::Ok => p.bg_ok,
+            ConsoleKind::Err => p.bg_err,
+            ConsoleKind::Run => p.bg_run,
+            ConsoleKind::Debug => p.bg_debug,
+            ConsoleKind::Idle => p.bg,
+        }
+    }
+
+    fn set_dark(&mut self, ctx: &Context, dark: bool) {
+        if pal().dark == dark && self.theme_anim.is_none() {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let origin = ctx
+            .pointer_latest_pos()
+            .unwrap_or(Pos2::new(screen.right() - 28.0, screen.top() + 28.0));
+        self.theme_anim = Some(ThemeAnim {
+            from: pal(),
+            to: theme::Palette::get(dark),
+            t: 0.0,
+            origin,
+        });
+        self.progress.dark = dark;
+        self.progress.save();
+    }
+
+    fn tick_theme(&mut self, ctx: &Context) {
+        let Some(anim) = &mut self.theme_anim else {
+            return;
+        };
+        let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.05);
+        anim.t = (anim.t + dt / 0.42).min(1.0);
+        let t = 1.0 - (1.0 - anim.t).powi(3);
+        let p = theme::Palette::lerp(anim.from, anim.to, t);
+        let done = anim.t >= 1.0;
+        let to = anim.to;
+        theme::apply(ctx, p);
+        if done {
+            theme::apply(ctx, to);
+            self.theme_anim = None;
+        }
+        ctx.request_repaint();
+    }
+
+    fn theme_overlay(&self, ctx: &Context) {
+        let Some(anim) = &self.theme_anim else {
+            return;
+        };
+        let screen = ctx.screen_rect();
+        let t = 1.0 - (1.0 - anim.t.clamp(0.0, 1.0)).powi(3);
+        let diag = screen.width().hypot(screen.height());
+        let r = t * diag * 1.15;
+        let a = ((1.0 - t) * 70.0) as u8;
+        let c = anim.to.bg;
+        let fill = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
+        egui::Area::new(egui::Id::new("theme_wipe"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.painter().circle_filled(anim.origin, r, fill);
+            });
+    }
+
+    fn dismiss_news(&mut self) {
+        self.show_news = false;
+        self.progress.last_seen_version = crate::version::APP_VERSION.into();
+        self.progress.save();
+    }
+
+    fn news_overlay(&mut self, ctx: &Context) {
+        if !self.show_news {
+            return;
+        }
+        let lang = self.lang;
+        let rel = crate::news::for_version(crate::version::APP_VERSION);
+        let items = crate::news::items(rel, lang);
+        let mut close = false;
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("news_scrim"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let resp = ui.allocate_rect(screen, Sense::click());
+                ui.painter().rect_filled(
+                    screen,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(8, 8, 7, 150),
+                );
+                if resp.clicked() {
+                    close = true;
+                }
+            });
+        egui::Window::new(tr(lang, "NOVEDADES", "WHAT'S NEW"))
+            .id(egui::Id::new("news_win"))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(false)
+            .frame(
+                Frame::NONE
+                    .fill(pal().panel)
+                    .stroke(hair(pal().accent))
+                    .inner_margin(Margin::same(20)),
+            )
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_max_width(400.0);
+                ui.label(
+                    RichText::new(tr(lang, "NOVEDADES", "WHAT'S NEW"))
+                        .monospace()
+                        .size(10.0)
+                        .color(pal().accent),
+                );
+                ui.label(
+                    RichText::new(format!("JavaCraft v{}", rel.version))
+                        .font(FontId::new(20.0, FontFamily::Proportional))
+                        .color(pal().text),
+                );
+                ui.add_space(12.0);
+                for line in items {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("▸").color(pal().accent).monospace());
+                        ui.label(RichText::new(*line).size(13.5).color(pal().text));
+                    });
+                    ui.add_space(6.0);
+                }
+                ui.add_space(10.0);
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(tr(lang, "ENTENDIDO", "GOT IT"))
+                                .monospace()
+                                .size(12.0)
+                                .color(pal().bg),
+                        )
+                        .fill(pal().accent)
+                        .stroke(Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    close = true;
+                }
+            });
+        if close {
+            self.dismiss_news();
         }
     }
 
     fn persist_draft(&mut self) {
+        self.progress.full_file = self.full_file;
+        self.progress.dark = pal().dark;
         if let Some(ex) = self.current() {
             let id = ex.id.clone();
-            if self.code.trim().is_empty() && !ex.is_free() {
+            let keep_empty = ex.is_free();
+            if self.code.trim().is_empty() && !keep_empty {
                 self.progress.drafts.remove(&id);
             } else {
                 self.progress.drafts.insert(id, self.code.clone());
@@ -355,7 +581,10 @@ impl JavaCraft {
                 ui.painter().rect_filled(
                     screen,
                     0.0,
-                    Color32::from_rgba_unmultiplied(8, 8, 7, a),
+                    {
+                        let f = pal().fade;
+                        Color32::from_rgba_unmultiplied(f.r(), f.g(), f.b(), a)
+                    },
                 );
             });
         if wave > 0.2 {
@@ -370,7 +599,7 @@ impl JavaCraft {
                         ui.label(
                             RichText::new(anim.to.switching_to())
                                 .size(18.0)
-                                .color(TEXT),
+                                .color(pal().text),
                         );
                     });
                 });
@@ -388,6 +617,9 @@ impl JavaCraft {
         if self.lang == Lang::Es {
             self.code = i18n::translate_comments(&self.code, Lang::Es);
         }
+        if self.full_file && !ex.is_free() && !self.code.contains("public class") {
+            self.code = catalog::assemble(ex, &self.code);
+        }
         self.error_line = None;
         self.error_lines.clear();
         self.error_cards.clear();
@@ -403,12 +635,12 @@ impl JavaCraft {
         self.show_result = false;
         self.stop_debug();
         self.pending_cursor = Some(practice::first_write_cursor(&self.code));
-        if self.is_free() {
+        if self.advanced() {
             self.show_result = true;
             self.practice_hint = tr(
                 self.lang,
-                "Práctica libre: clase + main. CORRER imprime la consola.",
-                "Free practice: class + main. RUN prints the console.",
+                "Archivo completo (Starter.java). CORRER muestra la consola.",
+                "Full file (Starter.java). RUN shows the console.",
             )
             .into();
         } else {
@@ -425,7 +657,11 @@ impl JavaCraft {
     fn reset_starter(&mut self) {
         if let Some(ex) = self.current() {
             let id = ex.id.clone();
-            self.code = ex.body.clone();
+            self.code = if self.advanced() && !ex.is_free() {
+                catalog::assemble(ex, &ex.body)
+            } else {
+                ex.body.clone()
+            };
             self.progress.drafts.remove(&id);
             self.progress.save();
             self.error_line = None;
@@ -485,7 +721,11 @@ impl JavaCraft {
         self.debug_watch_open = true;
         self.debug_hist_open.clear();
         let source = self.full_source();
-        let prefix = self.current().map(|e| e.prefix_newlines).unwrap_or(0);
+        let prefix = if self.advanced() {
+            0
+        } else {
+            self.current().map(|e| e.prefix_newlines).unwrap_or(0)
+        };
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (ev_tx, ev_rx) = mpsc::channel();
         self.debug_tx = Some(cmd_tx);
@@ -657,8 +897,8 @@ impl JavaCraft {
             .default_pos(Pos2::new(screen.right() - 340.0, 72.0))
             .frame(
                 Frame::NONE
-                    .fill(PANEL)
-                    .stroke(hair(WARN))
+                    .fill(pal().panel)
+                    .stroke(hair(pal().warn))
                     .inner_margin(Margin::symmetric(12, 10))
                     .corner_radius(4.0),
             )
@@ -668,7 +908,7 @@ impl JavaCraft {
                         RichText::new(tr(lang, "PASO A PASO", "STEP DEBUG"))
                             .monospace()
                             .size(10.0)
-                            .color(WARN),
+                            .color(pal().warn),
                     );
                     if self.debug_busy {
                         ui.spinner();
@@ -676,7 +916,7 @@ impl JavaCraft {
                             RichText::new(tr(lang, "leyendo…", "reading…"))
                                 .monospace()
                                 .size(11.0)
-                                .color(WARN),
+                                .color(pal().warn),
                         );
                     }
                 });
@@ -689,7 +929,7 @@ impl JavaCraft {
                             "Wait. Don’t press F10 again.",
                         ))
                             .size(13.0)
-                            .color(MUTED),
+                            .color(pal().muted),
                     );
                     ui.add_space(8.0);
                 }
@@ -701,7 +941,7 @@ impl JavaCraft {
                             "No variables yet. Press F10.",
                         ))
                             .size(13.0)
-                            .color(MUTED),
+                            .color(pal().muted),
                     );
                     return;
                 }
@@ -715,11 +955,11 @@ impl JavaCraft {
                             let hot = w.kind != WatchKind::Same
                                 && w.flash_at.elapsed() < Duration::from_millis(1600);
                             let fill = if !hot {
-                                PANEL_2
+                                pal().panel_2
                             } else if w.kind == WatchKind::New {
-                                Color32::from_rgb(28, 48, 32)
+                                pal().bg_ok
                             } else {
-                                Color32::from_rgb(58, 42, 16)
+                                pal().bg_debug
                             };
                             Frame::NONE
                                 .fill(fill)
@@ -732,7 +972,7 @@ impl JavaCraft {
                                                 RichText::new(format!("{}:{}", w.name, w.value))
                                                     .monospace()
                                                     .size(14.0)
-                                                    .color(if hot { WARN } else { TEXT }),
+                                                    .color(if hot { pal().warn } else { pal().text }),
                                             )
                                             .wrap(),
                                         );
@@ -788,8 +1028,8 @@ impl JavaCraft {
                 .default_pos(Pos2::new(screen.right() - 640.0, 120.0))
                 .frame(
                     Frame::NONE
-                        .fill(PANEL)
-                        .stroke(hair(WARN))
+                        .fill(pal().panel)
+                        .stroke(hair(pal().warn))
                         .inner_margin(Margin::symmetric(12, 10))
                         .corner_radius(4.0),
                 )
@@ -798,14 +1038,14 @@ impl JavaCraft {
                         RichText::new(format!("{} · {name}", tr(lang, "VALORES", "VALUES")))
                             .monospace()
                             .size(10.0)
-                            .color(WARN),
+                            .color(pal().warn),
                     );
                     ui.add_space(6.0);
                     if history.is_empty() {
                         ui.label(
                             RichText::new(tr(lang, "Sin historial todavía.", "No history yet."))
                                 .size(13.0)
-                                .color(MUTED),
+                                .color(pal().muted),
                         );
                     } else {
                         ScrollArea::vertical()
@@ -817,7 +1057,7 @@ impl JavaCraft {
                                         RichText::new(format!("{}.  {val}", i + 1))
                                             .monospace()
                                             .size(13.5)
-                                            .color(if last { WARN } else { TEXT }),
+                                            .color(if last { pal().warn } else { pal().text }),
                                     );
                                 }
                             });
@@ -960,6 +1200,17 @@ impl JavaCraft {
                     } else {
                         String::new()
                     };
+                } else if self.full_file {
+                    self.console_kind = ConsoleKind::Ok;
+                    if let Some(id) = &id {
+                        self.progress.mark_complete(id);
+                        self.progress.save();
+                    }
+                    self.console = if stdout.trim().is_empty() {
+                        tr(self.lang, "Correcto  ·  (sin salida)", "OK  ·  (no output)").into()
+                    } else {
+                        tr(self.lang, "Correcto", "OK").into()
+                    };
                 } else {
                     self.console_kind = ConsoleKind::Ok;
                     if let Some(id) = &id {
@@ -1085,24 +1336,25 @@ impl eframe::App for JavaCraft {
         self.poll_update(ctx);
         self.handle_keys(ctx);
         self.tick_lang(ctx);
+        self.tick_theme(ctx);
 
         let bg = self.canvas_bg();
         egui::TopBottomPanel::top("top_bar")
-            .frame(Frame::NONE.fill(bg).stroke(hair(LINE)))
+            .frame(Frame::NONE.fill(bg).stroke(hair(pal().line)))
             .show(ctx, |ui| self.top_bar(ui));
 
         egui::SidePanel::left("exercises")
             .resizable(true)
             .default_width(280.0)
             .min_width(170.0)
-            .frame(Frame::NONE.fill(PANEL).stroke(hair(LINE)))
+            .frame(Frame::NONE.fill(pal().panel).stroke(hair(pal().line)))
             .show(ctx, |ui| self.sidebar(ui));
 
         egui::SidePanel::right("brief")
             .resizable(true)
             .default_width(320.0)
             .min_width(180.0)
-            .frame(Frame::NONE.fill(PANEL).stroke(hair(LINE)))
+            .frame(Frame::NONE.fill(pal().panel).stroke(hair(pal().line)))
             .show(ctx, |ui| self.brief(ui));
 
         if self.show_result {
@@ -1110,7 +1362,7 @@ impl eframe::App for JavaCraft {
                 .resizable(true)
                 .default_height(240.0)
                 .min_height(110.0)
-                .frame(Frame::NONE.fill(PANEL).stroke(hair(LINE)))
+                .frame(Frame::NONE.fill(pal().panel).stroke(hair(pal().line)))
                 .show(ctx, |ui| self.console_panel(ui));
         }
 
@@ -1124,6 +1376,8 @@ impl eframe::App for JavaCraft {
         self.completion_popup(ctx);
         self.watch_window(ctx);
         self.lang_overlay(ctx);
+        self.theme_overlay(ctx);
+        self.news_overlay(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1149,27 +1403,36 @@ impl JavaCraft {
                             RichText::new("01 / STUDIO")
                                 .monospace()
                                 .size(10.0)
-                                .color(ACCENT),
+                                .color(pal().accent),
                         );
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new("JAVACRAFT")
                                     .font(FontId::new(20.0, FontFamily::Proportional))
-                                    .color(TEXT),
+                                    .color(pal().text),
                             );
-                            ui.label(
-                                RichText::new(format!("v{}", crate::version::APP_VERSION))
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(MUTED),
-                            );
+                            if ui
+                                .add(
+                                    Label::new(
+                                        RichText::new(format!("v{}", crate::version::APP_VERSION))
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(pal().accent),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .on_hover_text(tr(lang, "Novedades", "What's new"))
+                                .clicked()
+                            {
+                                self.show_news = true;
+                            }
                             ui.add_space(10.0);
                             ui.add(
                                 egui::Hyperlink::from_label_and_url(
                                     RichText::new("GitHub ↗")
                                         .monospace()
                                         .size(12.0)
-                                        .color(ACCENT),
+                                        .color(pal().accent),
                                     update::REPO_URL,
                                 )
                                 .open_in_new_tab(true),
@@ -1179,7 +1442,7 @@ impl JavaCraft {
                                     RichText::new(tr(lang, "DESCARGANDO…", "DOWNLOADING…"))
                                         .monospace()
                                         .size(11.0)
-                                        .color(WARN),
+                                        .color(pal().warn),
                                 );
                             } else if let Some(p) = &self.update_pending {
                                 let label = format!(
@@ -1190,9 +1453,9 @@ impl JavaCraft {
                                 if ui
                                     .add(
                                         egui::Button::new(
-                                            RichText::new(label).monospace().size(11.0).color(BG),
+                                            RichText::new(label).monospace().size(11.0).color(pal().bg),
                                         )
-                                        .fill(ACCENT)
+                                        .fill(pal().accent)
                                         .stroke(Stroke::NONE),
                                     )
                                     .clicked()
@@ -1213,18 +1476,31 @@ impl JavaCraft {
                             ))
                                 .monospace()
                                 .size(11.0)
-                                .color(DIM),
+                                .color(pal().dim),
                         );
                         let bar = ui.available_width().min(280.0);
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::new(bar, 3.0), Sense::hover());
-                        ui.painter().rect_filled(rect, 0.0, ACCENT_DIM);
+                        ui.painter().rect_filled(rect, 0.0, pal().accent_dim);
                         let mut fill = rect;
                         fill.set_width(rect.width() * ratio);
-                        ui.painter().rect_filled(fill, 0.0, ACCENT);
+                        ui.painter().rect_filled(fill, 0.0, pal().accent);
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let dark = pal().dark;
+                        let theme_resp = theme_icon_button(ui, dark);
+                        if theme_resp
+                            .on_hover_text(if dark {
+                                tr(lang, "Tema claro", "Light theme")
+                            } else {
+                                tr(lang, "Tema oscuro", "Dark theme")
+                            })
+                            .clicked()
+                        {
+                            self.set_dark(ui.ctx(), !dark);
+                        }
+                        ui.add_space(10.0);
                         let jdk = self
                             .jdk
                             .clone()
@@ -1233,25 +1509,58 @@ impl JavaCraft {
                             RichText::new(jdk)
                                 .monospace()
                                 .size(11.0)
-                                .color(if self.jdk.is_some() { OK } else { ERR }),
+                                .color(if self.jdk.is_some() { pal().ok } else { pal().err }),
                         );
                         ui.add_space(12.0);
                         let lang_btn = if lang == Lang::Es { "ES · en" } else { "es · EN" };
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new(lang_btn).monospace().size(11.0).color(TEXT),
+                                    RichText::new(lang_btn).monospace().size(11.0).color(pal().text),
                                 )
                                 .fill(if self.lang_anim.is_some() {
-                                    ACCENT_DIM
+                                    pal().accent_dim
                                 } else {
                                     Color32::TRANSPARENT
                                 })
-                                .stroke(hair(ACCENT)),
+                                .stroke(hair(pal().accent)),
                             )
                             .clicked()
                         {
                             self.request_lang(lang.other());
+                        }
+                        ui.add_space(12.0);
+                        let adv_on = self.advanced();
+                        let adv = ui.add(
+                            egui::Button::new(
+                                RichText::new(tr(lang, "AVANZADO", "ADVANCED"))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(if adv_on { pal().bg } else { pal().dim }),
+                            )
+                            .fill(if adv_on { pal().accent } else { Color32::TRANSPARENT })
+                            .stroke(hair(if adv_on { pal().accent } else { pal().line })),
+                        );
+                        let simple = ui.add_enabled(
+                            !self.is_free(),
+                            egui::Button::new(
+                                RichText::new(tr(lang, "SIMPLE", "SIMPLE"))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(if adv_on { pal().dim } else { pal().bg }),
+                            )
+                            .fill(if adv_on {
+                                Color32::TRANSPARENT
+                            } else {
+                                pal().accent
+                            })
+                            .stroke(hair(if adv_on { pal().line } else { pal().accent })),
+                        );
+                        if simple.clicked() {
+                            self.set_full_file(false);
+                        }
+                        if adv.clicked() {
+                            self.set_full_file(true);
                         }
                         ui.add_space(12.0);
                         let run_label = if self.running {
@@ -1262,9 +1571,9 @@ impl JavaCraft {
                         let run = ui.add_enabled(
                             !self.running && self.current().is_some(),
                             egui::Button::new(
-                                RichText::new(run_label).monospace().size(12.0).color(BG),
+                                RichText::new(run_label).monospace().size(12.0).color(pal().bg),
                             )
-                            .fill(ACCENT)
+                            .fill(pal().accent)
                             .stroke(Stroke::NONE),
                         );
                         if run.clicked() {
@@ -1281,9 +1590,9 @@ impl JavaCraft {
                                 .add_enabled(
                                     !self.debug_busy,
                                     egui::Button::new(
-                                        RichText::new(step_label).monospace().size(11.0).color(BG),
+                                        RichText::new(step_label).monospace().size(11.0).color(pal().bg),
                                     )
-                                    .fill(WARN)
+                                    .fill(pal().warn)
                                     .stroke(Stroke::NONE),
                                 )
                                 .clicked()
@@ -1293,15 +1602,17 @@ impl JavaCraft {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new(tr(lang, "DETENER", "STOP")).monospace().size(11.0).color(TEXT),
+                                        RichText::new(tr(lang, "DETENER", "STOP")).monospace().size(11.0).color(pal().text),
                                     )
                                     .fill(Color32::TRANSPARENT)
-                                    .stroke(hair(ERR)),
+                                    .stroke(hair(pal().err)),
                                 )
                                 .clicked()
                             {
                                 self.stop_debug();
-                                self.show_result = false;
+                                if !self.advanced() {
+                                    self.show_result = false;
+                                }
                             }
                         } else if ui
                             .add(
@@ -1309,10 +1620,10 @@ impl JavaCraft {
                                     RichText::new(tr(lang, "PASO A PASO  F10", "STEP  F10"))
                                         .monospace()
                                         .size(11.0)
-                                        .color(TEXT),
+                                        .color(pal().text),
                                 )
                                 .fill(Color32::TRANSPARENT)
-                                .stroke(hair(ACCENT)),
+                                .stroke(hair(pal().accent)),
                             )
                             .clicked()
                         {
@@ -1321,10 +1632,10 @@ impl JavaCraft {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new(tr(lang, "RESTAURAR", "RESET")).monospace().size(11.0).color(DIM),
+                                    RichText::new(tr(lang, "RESTAURAR", "RESET")).monospace().size(11.0).color(pal().dim),
                                 )
                                 .fill(Color32::TRANSPARENT)
-                                .stroke(hair(LINE)),
+                                .stroke(hair(pal().line)),
                             )
                             .clicked()
                         {
@@ -1337,7 +1648,7 @@ impl JavaCraft {
 
     fn sidebar(&mut self, ui: &mut Ui) {
                 Frame::NONE
-                    .fill(PANEL)
+                    .fill(pal().panel)
                     .inner_margin(Margin::symmetric(14, 14))
                     .show(ui, |ui| {
                         ui.set_min_height(ui.available_height());
@@ -1346,7 +1657,7 @@ impl JavaCraft {
                             RichText::new(tr(self.lang, "02 / EJERCICIOS", "02 / EXERCISES"))
                                 .monospace()
                                 .size(10.0)
-                                .color(ACCENT),
+                                .color(pal().accent),
                         );
                         ui.add_space(8.0);
                         ui.add(
@@ -1358,7 +1669,7 @@ impl JavaCraft {
                         ui.add_space(8.0);
 
                         if let Some(err) = &self.load_error {
-                            ui.colored_label(ERR, err);
+                            ui.colored_label(pal().err, err);
                             return;
                         }
 
@@ -1393,7 +1704,7 @@ impl JavaCraft {
                                             ))
                                             .monospace()
                                             .size(10.0)
-                                            .color(MUTED),
+                                            .color(pal().muted),
                                         );
                                         ui.add_space(4.0);
                                         last_level = ex.level;
@@ -1420,10 +1731,14 @@ impl JavaCraft {
                 ui.set_min_height(height);
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(tr(self.lang, "03 / TU CÓDIGO", "03 / YOUR CODE"))
-                            .monospace()
-                            .size(10.0)
-                            .color(ACCENT),
+                        RichText::new(if self.advanced() {
+                            tr(self.lang, "03 / STARTER.JAVA", "03 / STARTER.JAVA")
+                        } else {
+                            tr(self.lang, "03 / TU CÓDIGO", "03 / YOUR CODE")
+                        })
+                        .monospace()
+                        .size(10.0)
+                        .color(pal().accent),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -1434,14 +1749,14 @@ impl JavaCraft {
                             ))
                                 .monospace()
                                 .size(10.0)
-                                .color(MUTED),
+                                .color(pal().muted),
                         );
                     });
                 });
                 ui.label(
                     RichText::new(&self.practice_hint)
                         .size(12.5)
-                        .color(ACCENT),
+                        .color(pal().accent),
                 );
                 ui.add_space(6.0);
 
@@ -1477,16 +1792,16 @@ impl JavaCraft {
                                     egui::text::TextFormat {
                                         font_id: font.clone(),
                                         color: if bad {
-                                            ERR
+                                            pal().err
                                         } else if dbg {
-                                            Color32::from_rgb(255, 210, 90)
+                                            pal().warn
                                         } else {
-                                            MUTED
+                                            pal().muted
                                         },
                                         background: if bad {
-                                            crate::theme::ERR_BG
+                                            pal().err_bg
                                         } else if dbg {
-                                            Color32::from_rgb(140, 96, 16)
+                                            pal().debug_bg
                                         } else {
                                             Color32::TRANSPARENT
                                         },
@@ -1558,7 +1873,7 @@ impl JavaCraft {
                                         line,
                                     );
                                 }
-                            } else if !self.completion_open && !self.is_free() && !selecting {
+                            } else if !self.completion_open && !self.advanced() && !selecting {
                                 if output.response.changed() {
                                     let g = practice::after_edit(
                                         &self.code,
@@ -1604,31 +1919,31 @@ impl JavaCraft {
     }
 
     fn console_panel(&mut self, ui: &mut Ui) {
-        let free = self.is_free();
-        let (kicker_color, kicker) = if free {
+        let raw = self.advanced();
+        let (kicker_color, kicker) = if raw {
             match self.console_kind {
-                ConsoleKind::Run => (WARN, tr(self.lang, "04 / CONSOLA  ·  COMPILANDO", "04 / CONSOLE  ·  COMPILING")),
-                ConsoleKind::Err => (ERR, tr(self.lang, "04 / CONSOLA  ·  ERROR", "04 / CONSOLE  ·  ERROR")),
-                ConsoleKind::Debug => (WARN, tr(self.lang, "04 / CONSOLA  ·  DEBUG", "04 / CONSOLE  ·  DEBUG")),
-                _ => (DIM, tr(self.lang, "04 / CONSOLA", "04 / CONSOLE")),
+                ConsoleKind::Run => (pal().warn, tr(self.lang, "04 / CONSOLA  ·  COMPILANDO", "04 / CONSOLE  ·  COMPILING")),
+                ConsoleKind::Err => (pal().err, tr(self.lang, "04 / CONSOLA  ·  ERROR", "04 / CONSOLE  ·  ERROR")),
+                ConsoleKind::Debug => (pal().warn, tr(self.lang, "04 / CONSOLA  ·  DEBUG", "04 / CONSOLE  ·  DEBUG")),
+                _ => (pal().dim, tr(self.lang, "04 / CONSOLA", "04 / CONSOLE")),
             }
         } else {
             match self.console_kind {
-                ConsoleKind::Idle => (DIM, tr(self.lang, "04 / RESULTADO", "04 / RESULT")),
-                ConsoleKind::Run => (WARN, tr(self.lang, "04 / RESULTADO  ·  COMPILANDO", "04 / RESULT  ·  COMPILING")),
-                ConsoleKind::Ok => (OK, tr(self.lang, "04 / RESULTADO  ·  CORRECTO", "04 / RESULT  ·  OK")),
-                ConsoleKind::Err => (ERR, tr(self.lang, "04 / RESULTADO  ·  ERROR", "04 / RESULT  ·  ERROR")),
-                ConsoleKind::Debug => (WARN, tr(self.lang, "04 / RESULTADO  ·  DEBUG", "04 / RESULT  ·  DEBUG")),
+                ConsoleKind::Idle => (pal().dim, tr(self.lang, "04 / RESULTADO", "04 / RESULT")),
+                ConsoleKind::Run => (pal().warn, tr(self.lang, "04 / RESULTADO  ·  COMPILANDO", "04 / RESULT  ·  COMPILING")),
+                ConsoleKind::Ok => (pal().ok, tr(self.lang, "04 / RESULTADO  ·  CORRECTO", "04 / RESULT  ·  OK")),
+                ConsoleKind::Err => (pal().err, tr(self.lang, "04 / RESULTADO  ·  ERROR", "04 / RESULT  ·  ERROR")),
+                ConsoleKind::Debug => (pal().warn, tr(self.lang, "04 / RESULTADO  ·  DEBUG", "04 / RESULT  ·  DEBUG")),
             }
         };
-        let fill = if free {
-            Color32::from_rgb(12, 12, 12)
+        let fill = if raw {
+            pal().console
         } else {
             match self.console_kind {
-                ConsoleKind::Ok => Color32::from_rgb(22, 58, 34),
-                ConsoleKind::Err => Color32::from_rgb(72, 18, 20),
-                ConsoleKind::Debug => Color32::from_rgb(42, 36, 16),
-                _ => PANEL,
+                ConsoleKind::Ok => pal().bg_ok,
+                ConsoleKind::Err => pal().bg_err,
+                ConsoleKind::Debug => pal().bg_debug,
+                _ => pal().panel,
             }
         };
         Frame::NONE
@@ -1639,11 +1954,11 @@ impl JavaCraft {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(kicker).monospace().size(10.0).color(kicker_color));
                 ui.add_space(4.0);
-                if !free && !self.console.is_empty() {
+                if !self.console.is_empty() && !(raw && self.is_free()) {
                     ui.label(
                         RichText::new(&self.console)
                             .font(FontId::new(16.0, FontFamily::Proportional))
-                            .color(TEXT),
+                            .color(pal().text),
                     );
                     ui.add_space(8.0);
                 }
@@ -1654,7 +1969,7 @@ impl JavaCraft {
                         ui.set_width(ui.available_width());
                         for card in &self.error_cards {
                             Frame::NONE
-                                .fill(Color32::from_rgb(40, 12, 14))
+                                .fill(pal().bg_err)
                                 .inner_margin(Margin::same(10))
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
@@ -1662,11 +1977,11 @@ impl JavaCraft {
                                         RichText::new(format!("Línea {}", card.line))
                                             .monospace()
                                             .size(11.0)
-                                            .color(ERR),
+                                            .color(pal().err),
                                     );
                                     ui.add(
                                         Label::new(
-                                            RichText::new(&card.message).color(TEXT).size(14.0),
+                                            RichText::new(&card.message).color(pal().text).size(14.0),
                                         )
                                         .wrap(),
                                     );
@@ -1676,12 +1991,12 @@ impl JavaCraft {
                                         card.extra.clone()
                                     };
                                     if !hint.is_empty() {
-                                        ui.label(RichText::new(hint).color(DIM).size(13.0));
+                                        ui.label(RichText::new(hint).color(pal().dim).size(13.0));
                                     }
                                 });
                             ui.add_space(6.0);
                         }
-                        if free {
+                        if raw {
                             let dump = if self.output_lines.is_empty() {
                                 self.console.clone()
                             } else {
@@ -1692,7 +2007,7 @@ impl JavaCraft {
                                     RichText::new(dump)
                                         .monospace()
                                         .size(13.0)
-                                        .color(Color32::from_rgb(200, 220, 180)),
+                                        .color(pal().stdout),
                                 )
                                 .wrap()
                                 .selectable(true),
@@ -1700,7 +2015,7 @@ impl JavaCraft {
                         } else {
                             for line in &self.output_lines {
                                 Frame::NONE
-                                    .fill(Color32::from_rgb(18, 28, 22))
+                                    .fill(pal().bg_ok)
                                     .inner_margin(Margin::symmetric(12, 8))
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
@@ -1708,7 +2023,7 @@ impl JavaCraft {
                                             Label::new(
                                                 RichText::new(line)
                                                     .font(FontId::new(15.0, FontFamily::Proportional))
-                                                    .color(TEXT),
+                                                    .color(pal().text),
                                             )
                                             .wrap(),
                                         );
@@ -1722,7 +2037,7 @@ impl JavaCraft {
 
     fn brief(&mut self, ui: &mut Ui) {
                 Frame::NONE
-                    .fill(PANEL)
+                    .fill(pal().panel)
                     .inner_margin(Margin::symmetric(16, 14))
                     .show(ui, |ui| {
                         ui.set_min_height(ui.available_height());
@@ -1731,7 +2046,7 @@ impl JavaCraft {
                             RichText::new(tr(self.lang, "05 / BRIEF", "05 / BRIEF"))
                                 .monospace()
                                 .size(10.0)
-                                .color(ACCENT),
+                                .color(pal().accent),
                         );
                         ui.add_space(8.0);
                         if let Some(ex) = self.current() {
@@ -1740,7 +2055,7 @@ impl JavaCraft {
                             ui.label(
                                 RichText::new(title)
                                     .font(FontId::new(16.0, FontFamily::Proportional))
-                                    .color(TEXT),
+                                    .color(pal().text),
                             );
                             ui.add_space(4.0);
                             ui.label(
@@ -1752,7 +2067,7 @@ impl JavaCraft {
                                 ))
                                     .monospace()
                                     .size(10.0)
-                                    .color(DIM),
+                                    .color(pal().dim),
                             );
                             ui.add_space(10.0);
                             ScrollArea::vertical()
@@ -1778,8 +2093,8 @@ impl JavaCraft {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 Frame::NONE
-                    .fill(PANEL_2)
-                    .stroke(hair(ACCENT))
+                    .fill(pal().panel_2)
+                    .stroke(hair(pal().accent))
                     .inner_margin(Margin::same(6))
                     .show(ui, |ui| {
                         ui.set_min_width(360.0);
@@ -1788,12 +2103,12 @@ impl JavaCraft {
                             RichText::new("AUTOCOMPLETE")
                                 .monospace()
                                 .size(9.0)
-                                .color(ACCENT),
+                                .color(pal().accent),
                         );
                         ui.add_space(4.0);
                         for (i, item) in self.completions.iter().enumerate() {
                             let selected = i == self.completion_sel;
-                            let bg = if selected { ACCENT_DIM } else { Color32::TRANSPARENT };
+                            let bg = if selected { pal().accent_dim } else { Color32::TRANSPARENT };
                             let (rect, resp) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), 22.0),
                                 Sense::click(),
@@ -1804,7 +2119,7 @@ impl JavaCraft {
                                 egui::Align2::LEFT_CENTER,
                                 format!("{:<16} {}", item.label, item.detail),
                                 FontId::monospace(12.0),
-                                if selected { TEXT } else { DIM },
+                                if selected { pal().text } else { pal().dim },
                             );
                             if resp.clicked() {
                                 chosen = Some(i);
@@ -1813,12 +2128,12 @@ impl JavaCraft {
                         if let Some(item) = self.completions.get(self.completion_sel) {
                             ui.add_space(6.0);
                             let r = ui.available_rect_before_wrap();
-                            ui.painter().hline(r.x_range(), r.top(), hair(LINE));
+                            ui.painter().hline(r.x_range(), r.top(), hair(pal().line));
                             ui.add_space(6.0);
                             ui.label(
                                 RichText::new(&item.doc)
                                     .size(12.5)
-                                    .color(TEXT),
+                                    .color(pal().text),
                             );
                         }
                     });
@@ -1840,14 +2155,14 @@ fn exercise_row(
     let id = ui.id().with(("exercise_row", ex.number));
     let hovered = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
     let bg = if selected {
-        ACCENT_DIM
+        pal().accent_dim
     } else if hovered {
-        PANEL_2
+        pal().panel_2
     } else {
         Color32::TRANSPARENT
     };
     let mark = if done { "●" } else { "○" };
-    let mark_color = if done { OK } else { MUTED };
+    let mark_color = if done { pal().ok } else { pal().muted };
     let title = format!("{:02}  {}", ex.number, ex.title(lang));
     let max_w = ui.available_width();
     let inner = Frame::NONE
@@ -1860,7 +2175,7 @@ fn exercise_row(
                     Label::new(RichText::new(mark).monospace().color(mark_color)).selectable(false),
                 );
                 ui.add(
-                    Label::new(RichText::new(title).color(TEXT).size(12.5))
+                    Label::new(RichText::new(title).color(pal().text).size(12.5))
                         .wrap()
                         .selectable(false)
                         .sense(Sense::click()),
@@ -1903,8 +2218,41 @@ fn paint_debug_line(ui: &Ui, galley: &egui::Galley, origin: Pos2, code: &str, li
     painter.rect_filled(
         egui::Rect::from_min_size(Pos2::new(origin.x - 8.0, y0), Vec2::new(5.0, h)),
         0.0,
-        WARN,
+        pal().warn,
     );
+}
+
+fn theme_icon_button(ui: &mut Ui, dark: bool) -> egui::Response {
+    let size = Vec2::splat(28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter().rect_filled(rect, 3.0, pal().accent_dim);
+    }
+    let c = rect.center();
+    let col = pal().accent;
+    let painter = ui.painter();
+    if dark {
+        painter.circle_filled(c, 5.0, col);
+        for i in 0..8 {
+            let a = i as f32 * std::f32::consts::PI / 4.0;
+            let (s, co) = a.sin_cos();
+            let inner = 7.5;
+            let outer = 11.5;
+            painter.line_segment(
+                [
+                    Pos2::new(c.x + co * inner, c.y + s * inner),
+                    Pos2::new(c.x + co * outer, c.y + s * outer),
+                ],
+                Stroke::new(1.6_f32, col),
+            );
+        }
+    } else {
+        painter.circle_filled(c + Vec2::new(-1.5, 0.0), 7.5, col);
+        let cut = if resp.hovered() { pal().accent_dim } else { pal().bg };
+        painter.circle_filled(c + Vec2::new(3.2, -2.0), 6.2, cut);
+    }
+    resp
 }
 
 fn paint_grid(ui: &Ui) {
@@ -1913,7 +2261,7 @@ fn paint_grid(ui: &Ui) {
     let mut x = rect.left();
     let mut n = 0;
     while x <= rect.right() {
-        let color = if n % 5 == 0 { GRID_STRONG } else { GRID };
+        let color = if n % 5 == 0 { pal().grid_strong } else { pal().grid };
         painter.vline(x, rect.y_range(), hair(color));
         x += 24.0;
         n += 1;
@@ -1921,7 +2269,7 @@ fn paint_grid(ui: &Ui) {
     let mut y = rect.top();
     n = 0;
     while y <= rect.bottom() {
-        let color = if n % 5 == 0 { GRID_STRONG } else { GRID };
+        let color = if n % 5 == 0 { pal().grid_strong } else { pal().grid };
         painter.hline(rect.x_range(), y, hair(color));
         y += 24.0;
         n += 1;

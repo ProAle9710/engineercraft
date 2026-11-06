@@ -1,14 +1,7 @@
-use crate::theme::{hair, ACCENT, DEBUG_BG, DIM, ERR, ERR_BG, MUTED, TEXT, WARN};
+use crate::theme::{hair, pal};
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Color32, FontId, Stroke};
 use std::collections::HashSet;
-
-const KW: Color32 = Color32::from_rgb(200, 184, 154);
-const TY: Color32 = Color32::from_rgb(168, 191, 168);
-const STR: Color32 = Color32::from_rgb(214, 186, 140);
-const NUM: Color32 = Color32::from_rgb(184, 160, 144);
-const CM: Color32 = Color32::from_rgb(107, 103, 94);
-const TODO: Color32 = Color32::from_rgb(224, 122, 95);
 
 pub fn java(
     code: &str,
@@ -18,6 +11,7 @@ pub fn java(
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
+    let p = pal();
 
     let mut line_no = 1usize;
     let mut rest = code;
@@ -27,16 +21,16 @@ pub fn java(
         let bad = error_lines.contains(&line_no);
         let dbg = debug_line == Some(line_no);
         let bg = if bad {
-            ERR_BG
+            p.err_bg
         } else if dbg {
-            DEBUG_BG
+            p.debug_bg
         } else {
             Color32::TRANSPARENT
         };
         let underline = if bad {
-            hair(ERR)
+            hair(p.err)
         } else if dbg {
-            Stroke::new(2.5_f32, WARN)
+            Stroke::new(2.5_f32, p.warn)
         } else {
             Stroke::NONE
         };
@@ -55,7 +49,7 @@ pub fn java(
             0.0,
             TextFormat {
                 font_id: font,
-                color: DIM,
+                color: pal().dim,
                 ..Default::default()
             },
         );
@@ -71,13 +65,14 @@ fn split_line(s: &str) -> (&str, &str) {
 }
 
 fn tokenize_line(line: &str, bg: Color32, underline: Stroke, font: FontId, job: &mut LayoutJob) {
+    let p = pal();
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
         if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
             let comment: String = chars[i..].iter().collect();
-            let color = if comment.contains("TODO") { TODO } else { CM };
+            let color = if comment.contains("TODO") { p.todo } else { p.cm };
             append(job, &comment, color, bg, underline, &font);
             break;
         }
@@ -96,7 +91,7 @@ fn tokenize_line(line: &str, bg: Color32, underline: Stroke, font: FontId, job: 
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            append(job, &s, STR, bg, underline, &font);
+            append(job, &s, p.str_, bg, underline, &font);
             continue;
         }
         if ch == '\'' {
@@ -114,7 +109,7 @@ fn tokenize_line(line: &str, bg: Color32, underline: Stroke, font: FontId, job: 
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            append(job, &s, STR, bg, underline, &font);
+            append(job, &s, p.str_, bg, underline, &font);
             continue;
         }
         if ch.is_ascii_digit() {
@@ -124,7 +119,7 @@ fn tokenize_line(line: &str, bg: Color32, underline: Stroke, font: FontId, job: 
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            append(job, &s, NUM, bg, underline, &font);
+            append(job, &s, p.num, bg, underline, &font);
             continue;
         }
         if is_ident_start(ch) {
@@ -135,25 +130,25 @@ fn tokenize_line(line: &str, bg: Color32, underline: Stroke, font: FontId, job: 
             }
             let s: String = chars[start..i].iter().collect();
             let color = if is_keyword(&s) {
-                KW
+                p.kw
             } else if is_type(&s) {
-                TY
+                p.ty
             } else if s == "TODO" {
-                TODO
+                p.todo
             } else if s == "System" || s == "out" {
-                ACCENT
+                p.accent
             } else {
-                TEXT
+                p.text
             };
             append(job, &s, color, bg, underline, &font);
             continue;
         }
         let color = if "{}()[]".contains(ch) {
-            WARN
+            p.warn
         } else if ch == '\n' {
-            TEXT
+            p.text
         } else {
-            MUTED
+            p.muted
         };
         append(job, &ch.to_string(), color, bg, underline, &font);
         i += 1;

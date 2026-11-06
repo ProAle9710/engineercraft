@@ -1,5 +1,6 @@
 # Bumps patch version, builds release, packs MSI.
 # -Publish: crea GitHub Release vX.Y.Z y sube el MSI.
+# Antes de publicar: entrada nueva en src/news.rs.
 param([switch]$Publish)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot

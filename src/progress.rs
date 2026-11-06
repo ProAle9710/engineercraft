@@ -3,12 +3,35 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Progress {
     pub completed: HashSet<String>,
     pub drafts: HashMap<String, String>,
     #[serde(default)]
     pub lang: String,
+    #[serde(default)]
+    pub full_file: bool,
+    #[serde(default = "default_dark")]
+    pub dark: bool,
+    #[serde(default)]
+    pub last_seen_version: String,
+}
+
+fn default_dark() -> bool {
+    true
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            completed: HashSet::new(),
+            drafts: HashMap::new(),
+            lang: String::new(),
+            full_file: false,
+            dark: true,
+            last_seen_version: String::new(),
+        }
+    }
 }
 
 impl Progress {
