@@ -38,20 +38,16 @@ pub fn on_arrive(code: &str, cursor: usize, lang: crate::i18n::Lang) -> Guide {
     let trimmed = line.trim_start();
 
     if is_guide_comment(trimmed) {
-        let target = write_cursor_after_comment_block(code, line_start);
-        let (code, cursor) = ensure_indent_at(code, target, &indent);
         return Guide {
             hint: match lang {
-                crate::i18n::Lang::Es => format!(
-                    "Ese renglón es la instrucción. Escribe debajo, indentado ({} espacios), dentro del main.",
-                    indent.len()
-                ),
-                crate::i18n::Lang::En => format!(
-                    "That line is the instruction. Write below, indented ({} spaces), inside main.",
-                    indent.len()
-                ),
+                crate::i18n::Lang::Es => {
+                    "Comentario: puedes copiarlo. Para escribir, baja al bloque vacío.".into()
+                }
+                crate::i18n::Lang::En => {
+                    "Comment: you can copy it. To type, go to the empty block below.".into()
+                }
             },
-            code,
+            code: code.to_string(),
             cursor,
         };
     }

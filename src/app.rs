@@ -127,9 +127,12 @@ impl JavaCraft {
         };
         let progress = Progress::load();
         let lang = Lang::from_saved(&progress.lang);
-        let selected = 0;
+        let selected = catalog
+            .iter()
+            .position(|e| !e.is_free())
+            .unwrap_or(0);
         let mut code = catalog
-            .first()
+            .get(selected)
             .map(|ex| catalog::body_from_draft(ex, progress.drafts.get(&ex.id)))
             .unwrap_or_default();
         if lang == Lang::Es {
@@ -238,6 +241,10 @@ impl JavaCraft {
         self.catalog.get(self.selected)
     }
 
+    fn is_free(&self) -> bool {
+        self.current().is_some_and(|e| e.is_free())
+    }
+
     fn full_source(&self) -> String {
         match self.current() {
             Some(ex) => catalog::assemble(ex, &self.code),
@@ -275,7 +282,11 @@ impl JavaCraft {
     fn persist_draft(&mut self) {
         if let Some(ex) = self.current() {
             let id = ex.id.clone();
-            self.progress.drafts.insert(id, self.code.clone());
+            if self.code.trim().is_empty() && !ex.is_free() {
+                self.progress.drafts.remove(&id);
+            } else {
+                self.progress.drafts.insert(id, self.code.clone());
+            }
         }
         self.progress.save();
     }
@@ -392,12 +403,22 @@ impl JavaCraft {
         self.show_result = false;
         self.stop_debug();
         self.pending_cursor = Some(practice::first_write_cursor(&self.code));
-        self.practice_hint = tr(
-            self.lang,
-            "Escribe debajo del TODO, indentado dentro de main.",
-            "Write below the TODO, indented inside main.",
-        )
-        .into();
+        if self.is_free() {
+            self.show_result = true;
+            self.practice_hint = tr(
+                self.lang,
+                "Práctica libre: clase + main. CORRER imprime la consola.",
+                "Free practice: class + main. RUN prints the console.",
+            )
+            .into();
+        } else {
+            self.practice_hint = tr(
+                self.lang,
+                "Escribe debajo del TODO, indentado dentro de main.",
+                "Write below the TODO, indented inside main.",
+            )
+            .into();
+        }
         self.mark_dirty();
     }
 
@@ -928,20 +949,30 @@ impl JavaCraft {
                 self.output_lines = stdout_lines(&stdout);
             }
             Outcome::Success { stdout } => {
-                self.console_kind = ConsoleKind::Ok;
                 self.error_lines.clear();
                 self.error_line = None;
                 self.error_cards.clear();
-                if let Some(id) = &id {
-                    self.progress.mark_complete(id);
-                    self.progress.save();
-                }
-                self.console = format!(
-                    "Correcto  ·  {}/{}",
-                    self.progress.completed.len(),
-                    self.catalog.len()
-                );
                 self.output_lines = stdout_lines(&stdout);
+                if self.is_free() {
+                    self.console_kind = ConsoleKind::Idle;
+                    self.console = if stdout.trim().is_empty() {
+                        tr(self.lang, "(sin salida)", "(no output)").into()
+                    } else {
+                        String::new()
+                    };
+                } else {
+                    self.console_kind = ConsoleKind::Ok;
+                    if let Some(id) = &id {
+                        self.progress.mark_complete(id);
+                        self.progress.save();
+                    }
+                    let scored = self.catalog.iter().filter(|e| !e.is_free()).count();
+                    self.console = format!(
+                        "Correcto  ·  {}/{}",
+                        self.progress.completed.len(),
+                        scored
+                    );
+                }
             }
         }
     }
@@ -1012,21 +1043,21 @@ impl JavaCraft {
     }
 
     fn open_completions(&mut self) {
-        let (start, prefix) = complete::current_prefix(&self.code, self.cursor_bytes);
-        self.completion_start = start;
-        self.completions = complete::matching_forced(&prefix, &self.code);
+        let prefix = complete::current_prefix(&self.code, self.cursor_bytes);
+        self.completion_start = prefix.start;
+        self.completions = complete::matching_forced(&prefix, &self.code, self.lang);
         self.completion_open = !self.completions.is_empty();
         self.completion_sel = 0;
     }
 
     fn refresh_completions(&mut self) {
-        let (start, prefix) = complete::current_prefix(&self.code, self.cursor_bytes);
-        self.completion_start = start;
-        if prefix.is_empty() {
+        let prefix = complete::current_prefix(&self.code, self.cursor_bytes);
+        self.completion_start = prefix.start;
+        if prefix.text.is_empty() && !prefix.after_dot {
             self.completion_open = false;
             return;
         }
-        self.completions = complete::matching(&prefix, &self.code);
+        self.completions = complete::matching(&prefix, &self.code, self.lang);
         self.completion_open = !self.completions.is_empty();
         if self.completion_sel >= self.completions.len() {
             self.completion_sel = 0;
@@ -1105,7 +1136,7 @@ impl JavaCraft {
     fn top_bar(&mut self, ui: &mut Ui) {
         let lang = self.lang;
         let done = self.progress.completed.len();
-        let total = self.catalog.len().max(1);
+        let total = self.catalog.iter().filter(|e| !e.is_free()).count().max(1);
         let ratio = done as f32 / total as f32;
 
         Frame::NONE
@@ -1487,6 +1518,9 @@ impl JavaCraft {
                                 .layouter(&mut layouter)
                                 .show(ui);
 
+                            let selecting = output
+                                .cursor_range
+                                .is_some_and(|r| r.primary != r.secondary);
                             if let Some(range) = output.cursor_range {
                                 let char_idx = range.primary.index;
                                 self.cursor_bytes = self
@@ -1524,7 +1558,7 @@ impl JavaCraft {
                                         line,
                                     );
                                 }
-                            } else if !self.completion_open {
+                            } else if !self.completion_open && !self.is_free() && !selecting {
                                 if output.response.changed() {
                                     let g = practice::after_edit(
                                         &self.code,
@@ -1570,18 +1604,32 @@ impl JavaCraft {
     }
 
     fn console_panel(&mut self, ui: &mut Ui) {
-        let (kicker_color, kicker) = match self.console_kind {
-            ConsoleKind::Idle => (DIM, tr(self.lang, "04 / RESULTADO", "04 / RESULT")),
-            ConsoleKind::Run => (WARN, tr(self.lang, "04 / RESULTADO  ·  COMPILANDO", "04 / RESULT  ·  COMPILING")),
-            ConsoleKind::Ok => (OK, tr(self.lang, "04 / RESULTADO  ·  CORRECTO", "04 / RESULT  ·  OK")),
-            ConsoleKind::Err => (ERR, tr(self.lang, "04 / RESULTADO  ·  ERROR", "04 / RESULT  ·  ERROR")),
-            ConsoleKind::Debug => (WARN, tr(self.lang, "04 / RESULTADO  ·  DEBUG", "04 / RESULT  ·  DEBUG")),
+        let free = self.is_free();
+        let (kicker_color, kicker) = if free {
+            match self.console_kind {
+                ConsoleKind::Run => (WARN, tr(self.lang, "04 / CONSOLA  ·  COMPILANDO", "04 / CONSOLE  ·  COMPILING")),
+                ConsoleKind::Err => (ERR, tr(self.lang, "04 / CONSOLA  ·  ERROR", "04 / CONSOLE  ·  ERROR")),
+                ConsoleKind::Debug => (WARN, tr(self.lang, "04 / CONSOLA  ·  DEBUG", "04 / CONSOLE  ·  DEBUG")),
+                _ => (DIM, tr(self.lang, "04 / CONSOLA", "04 / CONSOLE")),
+            }
+        } else {
+            match self.console_kind {
+                ConsoleKind::Idle => (DIM, tr(self.lang, "04 / RESULTADO", "04 / RESULT")),
+                ConsoleKind::Run => (WARN, tr(self.lang, "04 / RESULTADO  ·  COMPILANDO", "04 / RESULT  ·  COMPILING")),
+                ConsoleKind::Ok => (OK, tr(self.lang, "04 / RESULTADO  ·  CORRECTO", "04 / RESULT  ·  OK")),
+                ConsoleKind::Err => (ERR, tr(self.lang, "04 / RESULTADO  ·  ERROR", "04 / RESULT  ·  ERROR")),
+                ConsoleKind::Debug => (WARN, tr(self.lang, "04 / RESULTADO  ·  DEBUG", "04 / RESULT  ·  DEBUG")),
+            }
         };
-        let fill = match self.console_kind {
-            ConsoleKind::Ok => Color32::from_rgb(22, 58, 34),
-            ConsoleKind::Err => Color32::from_rgb(72, 18, 20),
-            ConsoleKind::Debug => Color32::from_rgb(42, 36, 16),
-            _ => PANEL,
+        let fill = if free {
+            Color32::from_rgb(12, 12, 12)
+        } else {
+            match self.console_kind {
+                ConsoleKind::Ok => Color32::from_rgb(22, 58, 34),
+                ConsoleKind::Err => Color32::from_rgb(72, 18, 20),
+                ConsoleKind::Debug => Color32::from_rgb(42, 36, 16),
+                _ => PANEL,
+            }
         };
         Frame::NONE
             .fill(fill)
@@ -1591,12 +1639,14 @@ impl JavaCraft {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(kicker).monospace().size(10.0).color(kicker_color));
                 ui.add_space(4.0);
-                ui.label(
-                    RichText::new(&self.console)
-                        .font(FontId::new(16.0, FontFamily::Proportional))
-                        .color(TEXT),
-                );
-                ui.add_space(8.0);
+                if !free && !self.console.is_empty() {
+                    ui.label(
+                        RichText::new(&self.console)
+                            .font(FontId::new(16.0, FontFamily::Proportional))
+                            .color(TEXT),
+                    );
+                    ui.add_space(8.0);
+                }
                 ScrollArea::vertical()
                     .id_salt("result_scroll")
                     .auto_shrink([false, false])
@@ -1631,22 +1681,40 @@ impl JavaCraft {
                                 });
                             ui.add_space(6.0);
                         }
-                        for line in &self.output_lines {
-                            Frame::NONE
-                                .fill(Color32::from_rgb(18, 28, 22))
-                                .inner_margin(Margin::symmetric(12, 8))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.add(
-                                        Label::new(
-                                            RichText::new(line)
-                                                .font(FontId::new(15.0, FontFamily::Proportional))
-                                                .color(TEXT),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
-                            ui.add_space(4.0);
+                        if free {
+                            let dump = if self.output_lines.is_empty() {
+                                self.console.clone()
+                            } else {
+                                self.output_lines.join("\n")
+                            };
+                            ui.add(
+                                Label::new(
+                                    RichText::new(dump)
+                                        .monospace()
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(200, 220, 180)),
+                                )
+                                .wrap()
+                                .selectable(true),
+                            );
+                        } else {
+                            for line in &self.output_lines {
+                                Frame::NONE
+                                    .fill(Color32::from_rgb(18, 28, 22))
+                                    .inner_margin(Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.add(
+                                            Label::new(
+                                                RichText::new(line)
+                                                    .font(FontId::new(15.0, FontFamily::Proportional))
+                                                    .color(TEXT),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                                ui.add_space(4.0);
+                            }
                         }
                     });
             });
@@ -1714,7 +1782,8 @@ impl JavaCraft {
                     .stroke(hair(ACCENT))
                     .inner_margin(Margin::same(6))
                     .show(ui, |ui| {
-                        ui.set_min_width(280.0);
+                        ui.set_min_width(360.0);
+                        ui.set_max_width(420.0);
                         ui.label(
                             RichText::new("AUTOCOMPLETE")
                                 .monospace()
@@ -1733,13 +1802,24 @@ impl JavaCraft {
                             ui.painter().text(
                                 rect.left_center() + Vec2::new(8.0, 0.0),
                                 egui::Align2::LEFT_CENTER,
-                                format!("{:<8} {}", item.label, item.detail),
+                                format!("{:<16} {}", item.label, item.detail),
                                 FontId::monospace(12.0),
                                 if selected { TEXT } else { DIM },
                             );
                             if resp.clicked() {
                                 chosen = Some(i);
                             }
+                        }
+                        if let Some(item) = self.completions.get(self.completion_sel) {
+                            ui.add_space(6.0);
+                            let r = ui.available_rect_before_wrap();
+                            ui.painter().hline(r.x_range(), r.top(), hair(LINE));
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(&item.doc)
+                                    .size(12.5)
+                                    .color(TEXT),
+                            );
                         }
                     });
             });

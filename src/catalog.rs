@@ -104,7 +104,28 @@ pub fn load() -> Result<Vec<Exercise>, String> {
         return Err(format!("No hay ejercicios en {}", root.display()));
     }
     out.sort_by_key(|e| e.number);
+    out.insert(0, free_exercise());
     Ok(out)
+}
+
+pub const FREE_ID: &str = "free";
+
+pub fn free_exercise() -> Exercise {
+    let body = "public class Starter {\n    public static void main(String[] args) {\n        \n    }\n}\n".to_string();
+    Exercise {
+        id: FREE_ID.into(),
+        number: 0,
+        title_es: "Práctica libre".into(),
+        title_en: "Free practice".into(),
+        level: 0,
+        brief_es: "# Práctica libre\n\nEscribe Java completo (clase + `main`). CORRER muestra la consola real: `stdout` / errores, sin comparar con una salida esperada.".into(),
+        brief_en: "# Free practice\n\nWrite full Java (class + `main`). RUN shows the real console: `stdout` / errors, no expected-output checks.".into(),
+        prefix: String::new(),
+        suffix: String::new(),
+        prefix_newlines: 0,
+        stdout_needles: Vec::new(),
+        body,
+    }
 }
 
 pub fn exercises_dir() -> Option<PathBuf> {
@@ -189,10 +210,17 @@ pub fn split_template(src: &str) -> (String, String, String) {
 }
 
 pub fn assemble(ex: &Exercise, body: &str) -> String {
+    if ex.is_free() {
+        return body.to_string();
+    }
     format!("{}{}{}", ex.prefix, body, ex.suffix)
 }
 
 pub fn body_from_draft(ex: &Exercise, saved: Option<&String>) -> String {
+    let saved = saved.filter(|s| !s.trim().is_empty());
+    if ex.is_free() {
+        return saved.cloned().unwrap_or_else(|| ex.body.clone());
+    }
     match saved {
         Some(s) if s.contains("public class") => split_template(s).1,
         Some(s) => s.clone(),
@@ -201,6 +229,10 @@ pub fn body_from_draft(ex: &Exercise, saved: Option<&String>) -> String {
 }
 
 impl Exercise {
+    pub fn is_free(&self) -> bool {
+        self.id == FREE_ID
+    }
+
     pub fn title(&self, lang: Lang) -> &str {
         match lang {
             Lang::Es => &self.title_es,
@@ -217,6 +249,8 @@ impl Exercise {
 
     pub fn level_name(&self, lang: Lang) -> &'static str {
         match (self.level, lang) {
+            (0, Lang::Es) => "Libre",
+            (0, Lang::En) => "Free",
             (1, Lang::Es) => "Variables y lógica",
             (1, Lang::En) => "Variables and logic",
             (2, Lang::Es) => "Métodos y arreglos",
