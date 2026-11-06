@@ -167,7 +167,10 @@ fn clean_title(title: String) -> String {
 }
 
 pub fn split_template(src: &str) -> (String, String, String) {
-    let Some(main_at) = src.find("void main") else {
+    let Some(main_at) = src
+        .find("void main")
+        .or_else(|| src.find("void Main"))
+    else {
         return (String::new(), src.to_string(), String::new());
     };
     let Some(rel) = src[main_at..].find('{') else {
@@ -244,7 +247,7 @@ pub fn body_of(ex: &Exercise, src: &str) -> String {
         }
         return rest.to_string();
     }
-    if src.contains("public class") {
+    if is_full_source(ex, &src) {
         split_template(&src).1
     } else {
         src.to_string()
@@ -257,10 +260,40 @@ pub fn body_from_draft(ex: &Exercise, saved: Option<&String>) -> String {
         return saved.cloned().unwrap_or_else(|| ex.body.clone());
     }
     match saved {
-        Some(s) if s.contains("public class") => body_of(ex, s),
+        Some(s) if is_full_source(ex, s) => body_of(ex, s),
         Some(s) => s.clone(),
         None => ex.body.clone(),
     }
+}
+
+pub fn is_full_source(ex: &Exercise, s: &str) -> bool {
+    if ex.is_free() {
+        return true;
+    }
+    let s = s.replace("\r\n", "\n");
+    let p = ex.prefix.replace("\r\n", "\n");
+    if !p.trim().is_empty() && s.starts_with(p.trim_end()) {
+        return true;
+    }
+    s.contains("public class") || s.contains("static void Main")
+}
+
+pub fn draft_of<'a>(
+    progress: &'a crate::progress::Progress,
+    lang: crate::codelang::CodeLang,
+    id: &str,
+) -> Option<&'a String> {
+    let key = lang.draft_key(id);
+    progress
+        .drafts
+        .get(&key)
+        .or_else(|| {
+            if lang == crate::codelang::CodeLang::Java {
+                progress.drafts.get(id)
+            } else {
+                None
+            }
+        })
 }
 
 impl Exercise {

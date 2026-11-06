@@ -192,6 +192,16 @@ pub fn install_fonts(ctx: &egui::Context) {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ];
+    let display_paths = [
+        r"C:\Windows\Fonts\georgia.ttf",
+        r"C:\Windows\Fonts\georgiai.ttf",
+        r"C:\Windows\Fonts\constan.ttf",
+        r"C:\Windows\Fonts\palab.ttf",
+        r"C:\Windows\Fonts\SitkaVF.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    ];
 
     if let Some(bytes) = read_first(&mono_paths) {
         fonts.font_data.insert(
@@ -216,7 +226,22 @@ pub fn install_fonts(ctx: &egui::Context) {
         }
     }
 
+    if let Some(bytes) = read_first(&display_paths) {
+        fonts.font_data.insert(
+            "craft_display".into(),
+            Arc::new(FontData::from_owned(bytes)),
+        );
+        fonts.families.insert(
+            FontFamily::Name("craft_display".into()),
+            vec!["craft_display".into(), "craft_ui".into(), "craft_mono".into()],
+        );
+    }
+
     ctx.set_fonts(fonts);
+}
+
+pub fn display_family() -> FontFamily {
+    FontFamily::Name("craft_display".into())
 }
 
 pub fn apply(ctx: &egui::Context, p: Palette) {

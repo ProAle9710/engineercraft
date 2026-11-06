@@ -1,3 +1,4 @@
+use crate::codelang::CodeLang;
 use crate::theme::{hair, pal, Palette};
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Color32, FontId, Stroke};
@@ -8,6 +9,7 @@ pub fn java(
     error_lines: &HashSet<usize>,
     debug_line: Option<usize>,
     font: FontId,
+    lang: CodeLang,
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
@@ -28,7 +30,7 @@ pub fn java(
         } else {
             (p, Color32::TRANSPARENT, Stroke::NONE)
         };
-        tokenize_line(line, syn, bg, underline, font.clone(), &mut job);
+        tokenize_line(line, syn, bg, underline, font.clone(), lang, &mut job);
         if !rest.is_empty() || code.ends_with('\n') {
             // keep going
         }
@@ -64,12 +66,19 @@ fn tokenize_line(
     bg: Color32,
     underline: Stroke,
     font: FontId,
+    lang: CodeLang,
     job: &mut LayoutJob,
 ) {
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
+        if lang == CodeLang::Python && ch == '#' {
+            let comment: String = chars[i..].iter().collect();
+            let color = if comment.contains("TODO") { p.todo } else { p.cm };
+            append(job, &comment, color, bg, underline, &font);
+            break;
+        }
         if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
             let comment: String = chars[i..].iter().collect();
             let color = if comment.contains("TODO") { p.todo } else { p.cm };
@@ -129,9 +138,9 @@ fn tokenize_line(
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            let color = if is_keyword(&s) {
+            let color = if is_keyword(&s, lang) {
                 p.kw
-            } else if is_type(&s) {
+            } else if is_type(&s, lang) {
                 p.ty
             } else if s == "TODO" {
                 p.todo
@@ -177,36 +186,41 @@ fn is_ident(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-fn is_keyword(s: &str) -> bool {
-    matches!(
-        s,
-        "public"
-            | "class"
-            | "static"
-            | "void"
-            | "if"
-            | "else"
-            | "for"
-            | "while"
-            | "return"
-            | "new"
-            | "true"
-            | "false"
-            | "null"
-            | "break"
-            | "continue"
-            | "package"
-            | "import"
-            | "this"
-            | "final"
-            | "try"
-            | "catch"
-    )
+fn is_keyword(s: &str, lang: CodeLang) -> bool {
+    match lang {
+        CodeLang::Python => matches!(
+            s,
+            "if" | "else" | "elif" | "for" | "while" | "return" | "def" | "class" | "import"
+                | "from" | "True" | "False" | "None" | "break" | "continue" | "in" | "not" | "and"
+                | "or" | "pass" | "lambda" | "try" | "except"
+        ),
+        CodeLang::CSharp => matches!(
+            s,
+            "public" | "class" | "static" | "void" | "if" | "else" | "for" | "while" | "return"
+                | "new" | "true" | "false" | "null" | "break" | "continue" | "using" | "namespace"
+                | "this" | "var" | "try" | "catch"
+        ),
+        CodeLang::Java => matches!(
+            s,
+            "public" | "class" | "static" | "void" | "if" | "else" | "for" | "while" | "return"
+                | "new" | "true" | "false" | "null" | "break" | "continue" | "package" | "import"
+                | "this" | "final" | "try" | "catch"
+        ),
+    }
 }
 
-fn is_type(s: &str) -> bool {
-    matches!(
-        s,
-        "String" | "int" | "boolean" | "double" | "char" | "byte" | "long" | "float" | "short" | "Math"
-    )
+fn is_type(s: &str, lang: CodeLang) -> bool {
+    match lang {
+        CodeLang::Python => false,
+        CodeLang::CSharp => matches!(
+            s,
+            "string" | "int" | "bool" | "double" | "char" | "byte" | "long" | "float" | "short"
+                | "Console" | "Math"
+        ),
+        CodeLang::Java => matches!(
+            s,
+            "String" | "int" | "boolean" | "double" | "char" | "byte" | "long" | "float" | "short"
+                | "Math"
+        ),
+    }
 }

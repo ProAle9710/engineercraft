@@ -15,6 +15,8 @@ pub struct Progress {
     pub dark: bool,
     #[serde(default)]
     pub last_seen_version: String,
+    #[serde(default)]
+    pub code_lang: String,
 }
 
 fn default_dark() -> bool {
@@ -30,6 +32,7 @@ impl Default for Progress {
             full_file: false,
             dark: true,
             last_seen_version: String::new(),
+            code_lang: String::new(),
         }
     }
 }
@@ -55,6 +58,32 @@ impl Progress {
 
     pub fn mark_complete(&mut self, id: &str) {
         self.completed.insert(id.to_string());
+    }
+
+    pub fn is_complete(&self, lang: crate::codelang::CodeLang, id: &str) -> bool {
+        self.completed_ids(lang).contains(id)
+    }
+
+    pub fn completed_ids(&self, lang: crate::codelang::CodeLang) -> HashSet<String> {
+        let prefix = format!("{}:", lang.id());
+        let mut ids = HashSet::new();
+        for k in &self.completed {
+            if let Some(id) = k.strip_prefix(&prefix) {
+                if id != "free" {
+                    ids.insert(id.to_string());
+                }
+            } else if lang == crate::codelang::CodeLang::Java
+                && !k.contains(':')
+                && k != "free"
+            {
+                ids.insert(k.clone());
+            }
+        }
+        ids
+    }
+
+    pub fn complete_count(&self, lang: crate::codelang::CodeLang) -> usize {
+        self.completed_ids(lang).len()
     }
 }
 

@@ -11,16 +11,16 @@ pub const RELEASES: &[Release] = &[
     Release {
         version: "0.2.1",
         es: &[
-            "Pasa a llamarse EngineerCraft (mismo instalador: actualiza JavaCraft).",
-            "Logo E y repo github.com/ProAle9710/engineercraft.",
+            "Selector Java / C# / Python: el mismo ejercicio en el otro lenguaje.",
+            "Si falta JDK, .NET o Python: guía con winget/brew/apt y enlaces oficiales.",
+            "Pasa a llamarse EngineerCraft (actualiza JavaCraft).",
             "Cierre automático de comillas y snippets if/for/while.",
-            "SIMPLE / AVANZADO y tema claro/oscuro.",
         ],
         en: &[
-            "Renamed EngineerCraft (same installer: upgrades JavaCraft).",
-            "E logo and repo github.com/ProAle9710/engineercraft.",
+            "Java / C# / Python switcher: same exercise in the other language.",
+            "Missing JDK, .NET or Python: guide with winget/brew/apt and official links.",
+            "Renamed EngineerCraft (upgrades JavaCraft).",
             "Auto-close quotes and if/for/while snippets.",
-            "SIMPLE / ADVANCED and light/dark theme.",
         ],
     },
     Release {

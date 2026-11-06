@@ -44,7 +44,9 @@ pub fn tr(lang: Lang, es: &'static str, en: &'static str) -> &'static str {
 
 const COMMENT_PAIRS: &[(&str, &str)] = &[
     ("Create a String variable called", "Crea una variable String llamada"),
+    ("Create a string variable called", "Crea una variable string llamada"),
     ("Create a String variable", "Crea una variable String"),
+    ("Create a string variable", "Crea una variable string"),
     ("Create String[]", "Crea String[]"),
     ("Create int[]", "Crea int[]"),
     ("Create boolean", "Crea boolean"),
@@ -104,12 +106,12 @@ pub fn translate_comments(code: &str, to: Lang) -> String {
 
 fn translate_comment_line(line: &str, to: Lang) -> String {
     let trimmed = line.trim_start();
-    if !trimmed.starts_with("//") {
+    let marker = comment_marker(trimmed);
+    let Some(slash) = marker else {
         return line.to_string();
-    }
+    };
     let indent_len = line.len() - trimmed.len();
     let indent = &line[..indent_len];
-    let slash = if trimmed.starts_with("// ") { "// " } else { "//" };
     let mut body = trimmed[slash.len()..].to_string();
     for (en, es) in COMMENT_PAIRS {
         let (from, dest) = match to {
@@ -121,4 +123,21 @@ fn translate_comment_line(line: &str, to: Lang) -> String {
         }
     }
     format!("{indent}{slash}{body}")
+}
+
+fn comment_marker(trimmed: &str) -> Option<&'static str> {
+    if trimmed.starts_with("#!") {
+        return None;
+    }
+    if trimmed.starts_with("// ") {
+        Some("// ")
+    } else if trimmed.starts_with("//") {
+        Some("//")
+    } else if trimmed.starts_with("# ") {
+        Some("# ")
+    } else if trimmed.starts_with('#') {
+        Some("#")
+    } else {
+        None
+    }
 }

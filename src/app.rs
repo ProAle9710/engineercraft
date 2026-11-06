@@ -1,4 +1,5 @@
 use crate::catalog::{self, Exercise};
+use crate::codelang::{self, CodeLang};
 use crate::complete::{self, Completion};
 use crate::debug;
 use crate::highlight;
@@ -46,7 +47,9 @@ struct WatchVar {
 }
 
 pub struct EngineerCraft {
+    base: Vec<Exercise>,
     catalog: Vec<Exercise>,
+    code_lang: CodeLang,
     load_error: Option<String>,
     selected: usize,
     code: String,
@@ -58,7 +61,7 @@ pub struct EngineerCraft {
     error_line: Option<usize>,
     error_lines: HashSet<usize>,
     progress: Progress,
-    jdk: Option<String>,
+    jdk: Option<codelang::Toolchain>,
     running: bool,
     tx: Sender<Outcome>,
     rx: Receiver<Outcome>,
@@ -128,11 +131,13 @@ impl EngineerCraft {
             });
         }
         let loaded = catalog::load();
-        let (catalog, load_error) = match loaded {
+        let (base, load_error) = match loaded {
             Ok(c) => (c, None),
             Err(e) => (Vec::new(), Some(e)),
         };
         let progress = Progress::load();
+        let code_lang = CodeLang::from_saved(&progress.code_lang);
+        let catalog = crate::transpile::adapt_all(&base, code_lang);
         theme::apply(&cc.egui_ctx, theme::Palette::get(progress.dark));
         let lang = Lang::from_saved(&progress.lang);
         let selected = catalog
@@ -141,7 +146,9 @@ impl EngineerCraft {
             .unwrap_or(0);
         let mut code = catalog
             .get(selected)
-            .map(|ex| catalog::body_from_draft(ex, progress.drafts.get(&ex.id)))
+            .map(|ex| {
+                catalog::body_from_draft(ex, catalog::draft_of(&progress, code_lang, &ex.id))
+            })
             .unwrap_or_default();
         if lang == Lang::Es {
             code = i18n::translate_comments(&code, Lang::Es);
@@ -149,7 +156,7 @@ impl EngineerCraft {
         let full_file = progress.full_file;
         if full_file {
             if let Some(ex) = catalog.get(selected) {
-                if !ex.is_free() && !code.contains("public class") {
+                if !ex.is_free() && !catalog::is_full_source(ex, &code) {
                     code = catalog::assemble(ex, &code);
                 }
             }
@@ -158,7 +165,9 @@ impl EngineerCraft {
         let show_news = progress.last_seen_version != crate::version::APP_VERSION;
 
         Self {
+            base,
             catalog,
+            code_lang,
             load_error,
             selected,
             code,
@@ -170,7 +179,7 @@ impl EngineerCraft {
             error_line: None,
             error_lines: HashSet::new(),
             progress,
-            jdk: runner::jdk_version(),
+            jdk: codelang::detect(code_lang),
             running: false,
             tx,
             rx,
@@ -494,9 +503,57 @@ impl EngineerCraft {
         }
     }
 
+    fn tool_ready(&self) -> bool {
+        self.jdk.is_some()
+    }
+
+    fn reload_editor_code(&mut self) {
+        let Some(ex) = self.current().cloned() else {
+            return;
+        };
+        self.code = catalog::body_from_draft(
+            &ex,
+            catalog::draft_of(&self.progress, self.code_lang, &ex.id),
+        );
+        if self.lang == Lang::Es {
+            self.code = i18n::translate_comments(&self.code, Lang::Es);
+        }
+        if self.full_file && !ex.is_free() && !catalog::is_full_source(&ex, &self.code) {
+            self.code = catalog::assemble(&ex, &self.code);
+        }
+        self.pending_cursor = Some(practice::first_write_cursor(&self.code));
+    }
+
+    fn set_code_lang(&mut self, lang: CodeLang) {
+        if lang == self.code_lang {
+            self.jdk = codelang::detect(lang);
+            return;
+        }
+        if self.tool_ready() {
+            self.persist_draft();
+        }
+        let keep = self.current().map(|e| e.id.clone());
+        self.code_lang = lang;
+        self.progress.code_lang = lang.id().into();
+        self.catalog = crate::transpile::adapt_all(&self.base, lang);
+        self.jdk = codelang::detect(lang);
+        if let Some(id) = keep {
+            if let Some(i) = self.catalog.iter().position(|e| e.id == id) {
+                self.selected = i;
+            }
+        }
+        self.stop_debug();
+        if self.tool_ready() {
+            self.reload_editor_code();
+            self.mark_dirty();
+        }
+        self.progress.save();
+    }
+
     fn persist_draft(&mut self) {
         self.progress.full_file = self.full_file;
         self.progress.dark = pal().dark;
+        self.progress.code_lang = self.code_lang.id().into();
         if let Some(ex) = self.current() {
             let id = ex.id.clone();
             let keep_empty = ex.is_free();
@@ -505,10 +562,11 @@ impl EngineerCraft {
             } else {
                 self.code.clone()
             };
+            let key = self.code_lang.draft_key(&id);
             if text.trim().is_empty() && !keep_empty {
-                self.progress.drafts.remove(&id);
+                self.progress.drafts.remove(&key);
             } else {
-                self.progress.drafts.insert(id, text);
+                self.progress.drafts.insert(key, text);
             }
         }
         self.progress.save();
@@ -610,11 +668,14 @@ impl EngineerCraft {
         self.persist_draft();
         self.selected = index;
         let ex = &self.catalog[index];
-        self.code = catalog::body_from_draft(ex, self.progress.drafts.get(&ex.id));
+        self.code = catalog::body_from_draft(
+            ex,
+            catalog::draft_of(&self.progress, self.code_lang, &ex.id),
+        );
         if self.lang == Lang::Es {
             self.code = i18n::translate_comments(&self.code, Lang::Es);
         }
-        if self.full_file && !ex.is_free() && !self.code.contains("public class") {
+        if self.full_file && !ex.is_free() && !catalog::is_full_source(ex, &self.code) {
             self.code = catalog::assemble(ex, &self.code);
         }
         self.error_line = None;
@@ -659,7 +720,7 @@ impl EngineerCraft {
             } else {
                 ex.body.clone()
             };
-            self.progress.drafts.remove(&id);
+            self.progress.drafts.remove(&self.code_lang.draft_key(&id));
             self.progress.save();
             self.error_line = None;
             self.error_lines.clear();
@@ -676,7 +737,7 @@ impl EngineerCraft {
     }
 
     fn run(&mut self) {
-        if self.running {
+        if self.running || !self.tool_ready() {
             return;
         }
         let needles = match self.current() {
@@ -694,13 +755,24 @@ impl EngineerCraft {
         self.output_lines.clear();
         let code = self.full_source();
         let tx = self.tx.clone();
+        let lang = self.code_lang;
         thread::spawn(move || {
-            let _ = tx.send(runner::evaluate(&code, &needles));
+            let _ = tx.send(runner::evaluate(&code, &needles, lang));
         });
     }
 
     fn start_debug(&mut self) {
         if self.running {
+            return;
+        }
+        if self.code_lang != CodeLang::Java {
+            self.console_kind = ConsoleKind::Err;
+            self.console = tr(
+                self.lang,
+                "El paso a paso (jdb) solo está en Java.",
+                "Step-debug (jdb) is Java-only.",
+            )
+            .into();
             return;
         }
         self.persist_draft();
@@ -1101,15 +1173,16 @@ impl EngineerCraft {
             .dirty_at
             .map(|t| t.elapsed() >= Duration::from_millis(450))
             .unwrap_or(false);
-        if due && !self.linting && !self.running {
+        if due && !self.linting && !self.running && self.tool_ready() {
             self.dirty_at = None;
             self.linting = true;
             self.lint_gen += 1;
             let gen = self.lint_gen;
             let code = self.full_source();
             let tx = self.lint_tx.clone();
+            let lang = self.code_lang;
             thread::spawn(move || {
-                let _ = tx.send((gen, runner::lint(&code)));
+                let _ = tx.send((gen, runner::lint(&code, lang)));
             });
         }
         if self.linting || self.dirty_at.is_some() {
@@ -1200,7 +1273,7 @@ impl EngineerCraft {
                 } else if self.full_file {
                     self.console_kind = ConsoleKind::Ok;
                     if let Some(id) = &id {
-                        self.progress.mark_complete(id);
+                        self.progress.mark_complete(&self.code_lang.draft_key(id));
                         self.progress.save();
                     }
                     self.console = if stdout.trim().is_empty() {
@@ -1211,13 +1284,13 @@ impl EngineerCraft {
                 } else {
                     self.console_kind = ConsoleKind::Ok;
                     if let Some(id) = &id {
-                        self.progress.mark_complete(id);
+                        self.progress.mark_complete(&self.code_lang.draft_key(id));
                         self.progress.save();
                     }
                     let scored = self.catalog.iter().filter(|e| !e.is_free()).count();
                     self.console = format!(
                         "Correcto  ·  {}/{}",
-                        self.progress.completed.len(),
+                        self.progress.complete_count(self.code_lang),
                         scored
                     );
                 }
@@ -1293,7 +1366,7 @@ impl EngineerCraft {
     fn open_completions(&mut self) {
         let prefix = complete::current_prefix(&self.code, self.cursor_bytes);
         self.completion_start = prefix.start;
-        self.completions = complete::matching_forced(&prefix, &self.code, self.lang);
+        self.completions = complete::matching_forced(&prefix, &self.code, self.lang, self.code_lang);
         self.completion_open = !self.completions.is_empty();
         self.completion_sel = 0;
     }
@@ -1305,7 +1378,7 @@ impl EngineerCraft {
             self.completion_open = false;
             return;
         }
-        self.completions = complete::matching(&prefix, &self.code, self.lang);
+        self.completions = complete::matching(&prefix, &self.code, self.lang, self.code_lang);
         self.completion_open = !self.completions.is_empty();
         if self.completion_sel >= self.completions.len() {
             self.completion_sel = 0;
@@ -1386,14 +1459,18 @@ impl eframe::App for EngineerCraft {
 impl EngineerCraft {
     fn top_bar(&mut self, ui: &mut Ui) {
         let lang = self.lang;
-        let done = self.progress.completed.len();
+        let done = self
+            .catalog
+            .iter()
+            .filter(|e| !e.is_free() && self.progress.is_complete(self.code_lang, &e.id))
+            .count();
         let total = self.catalog.iter().filter(|e| !e.is_free()).count().max(1);
         let ratio = done as f32 / total as f32;
 
         Frame::NONE
             .inner_margin(Margin::symmetric(20, 12))
             .show(ui, |ui| {
-                ui.set_min_height(56.0);
+                ui.set_min_height(72.0);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
@@ -1404,8 +1481,8 @@ impl EngineerCraft {
                         );
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("ENGINEERCRAFT")
-                                    .font(FontId::new(20.0, FontFamily::Proportional))
+                                RichText::new("EngineerCraft")
+                                    .font(FontId::new(22.0, theme::display_family()))
                                     .color(pal().text),
                             );
                             if ui
@@ -1461,6 +1538,7 @@ impl EngineerCraft {
                                 }
                             }
                         });
+                        self.medal_row(ui);
                     });
 
                     ui.add_space(24.0);
@@ -1500,14 +1578,44 @@ impl EngineerCraft {
                         ui.add_space(10.0);
                         let jdk = self
                             .jdk
-                            .clone()
-                            .unwrap_or_else(|| tr(lang, "JDK no encontrado", "JDK not found").into());
+                            .as_ref()
+                            .map(|t| t.label.clone())
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "{} {}",
+                                    self.code_lang.label(),
+                                    tr(lang, "no encontrado", "not found")
+                                )
+                            });
                         ui.label(
                             RichText::new(jdk)
                                 .monospace()
                                 .size(11.0)
                                 .color(if self.jdk.is_some() { pal().ok } else { pal().err }),
                         );
+                        ui.add_space(8.0);
+                        for cl in CodeLang::ALL {
+                            let on = self.code_lang == cl;
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(cl.label())
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(if on { pal().bg } else { pal().text }),
+                                    )
+                                    .fill(if on {
+                                        pal().accent
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .stroke(hair(if on { pal().accent } else { pal().line })),
+                                )
+                                .clicked()
+                            {
+                                self.set_code_lang(cl);
+                            }
+                        }
                         ui.add_space(12.0);
                         let lang_btn = if lang == Lang::Es { "ES · en" } else { "es · EN" };
                         if ui
@@ -1566,7 +1674,7 @@ impl EngineerCraft {
                             tr(lang, "CORRER  F5", "RUN  F5")
                         };
                         let run = ui.add_enabled(
-                            !self.running && self.current().is_some(),
+                            !self.running && self.current().is_some() && self.tool_ready(),
                             egui::Button::new(
                                 RichText::new(run_label).monospace().size(12.0).color(pal().bg),
                             )
@@ -1669,6 +1777,19 @@ impl EngineerCraft {
                             ui.colored_label(pal().err, err);
                             return;
                         }
+                        if !self.tool_ready() {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(tr(
+                                    self.lang,
+                                    "Instala el lenguaje para ver los ejercicios.",
+                                    "Install the language to see the exercises.",
+                                ))
+                                .color(pal().err)
+                                .size(13.0),
+                            );
+                            return;
+                        }
 
                         let filter = self.filter.to_ascii_lowercase();
                         let mut last_level = 0u8;
@@ -1706,7 +1827,7 @@ impl EngineerCraft {
                                         ui.add_space(4.0);
                                         last_level = ex.level;
                                     }
-                                    let done = self.progress.completed.contains(&ex.id);
+                                    let done = self.progress.is_complete(self.code_lang, &ex.id);
                                     let selected = idx == self.selected;
                                     let row = exercise_row(ui, ex, done, selected, self.lang);
                                     if row.clicked() {
@@ -1720,7 +1841,86 @@ impl EngineerCraft {
                     });
     }
 
+    fn requirements_panel(&mut self, ui: &mut Ui) {
+        let g = codelang::guide(self.code_lang, self.lang);
+        Frame::NONE
+            .inner_margin(Margin::symmetric(24, 18))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(tr(self.lang, "REQUISITOS", "REQUIREMENTS"))
+                        .monospace()
+                        .size(10.0)
+                        .color(pal().accent),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(g.title)
+                        .font(FontId::new(22.0, FontFamily::Proportional))
+                        .color(pal().text),
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new(g.why).size(14.0).color(pal().dim));
+                ui.add_space(14.0);
+                ui.label(
+                    RichText::new(tr(self.lang, "Sitio oficial", "Official site"))
+                        .monospace()
+                        .size(11.0)
+                        .color(pal().muted),
+                );
+                if ui
+                    .link(RichText::new(g.official_label).color(pal().accent).size(14.0))
+                    .clicked()
+                {
+                    codelang::open_url(g.official);
+                }
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new(tr(self.lang, "Instalar en esta máquina", "Install on this machine"))
+                        .monospace()
+                        .size(11.0)
+                        .color(pal().muted),
+                );
+                ui.label(
+                    RichText::new(g.cmd)
+                        .monospace()
+                        .size(14.0)
+                        .color(pal().text),
+                );
+                ui.add_space(8.0);
+                if ui
+                    .link(RichText::new(tr(self.lang, "Documentación de instalación ↗", "Install docs ↗")).color(pal().accent))
+                    .clicked()
+                {
+                    codelang::open_url(g.docs);
+                }
+                ui.add_space(16.0);
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(tr(self.lang, "YA LO INSTALÉ — DETECTAR", "I INSTALLED IT — DETECT"))
+                                .monospace()
+                                .size(12.0)
+                                .color(pal().bg),
+                        )
+                        .fill(pal().accent),
+                    )
+                    .clicked()
+                {
+                    self.jdk = codelang::detect(self.code_lang);
+                    if self.tool_ready() {
+                        self.reload_editor_code();
+                        self.mark_dirty();
+                    }
+                }
+            });
+    }
+
     fn editor(&mut self, ui: &mut Ui) {
+        if !self.tool_ready() {
+            self.requirements_panel(ui);
+            return;
+        }
         let height = ui.available_height();
         Frame::NONE
             .inner_margin(Margin::symmetric(12, 10))
@@ -1729,9 +1929,9 @@ impl EngineerCraft {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if self.advanced() {
-                            tr(self.lang, "03 / STARTER.JAVA", "03 / STARTER.JAVA")
+                            format!("03 / STARTER.{}", self.code_lang.ext().to_ascii_uppercase())
                         } else {
-                            tr(self.lang, "03 / TU CÓDIGO", "03 / YOUR CODE")
+                            tr(self.lang, "03 / TU CÓDIGO", "03 / YOUR CODE").into()
                         })
                         .monospace()
                         .size(10.0)
@@ -1761,12 +1961,14 @@ impl EngineerCraft {
                 let font_layout = font.clone();
                 let error_lines = self.error_lines.clone();
                 let debug_line = self.debug_line;
+                let code_lang = self.code_lang;
                 let mut layouter = move |ui: &Ui, text: &dyn egui::TextBuffer, _wrap: f32| {
                     let mut job: LayoutJob = highlight::java(
                         text.as_str(),
                         &error_lines,
                         debug_line,
                         font_layout.clone(),
+                        code_lang,
                     );
                     job.wrap.max_width = f32::INFINITY;
                     ui.fonts(|f| f.layout_job(job))
@@ -2230,6 +2432,83 @@ fn paint_debug_line(ui: &Ui, galley: &egui::Galley, origin: Pos2, code: &str, li
         egui::Rect::from_min_size(Pos2::new(origin.x - 8.0, y0), Vec2::new(5.0, h)),
         0.0,
         pal().warn,
+    );
+}
+
+impl EngineerCraft {
+    fn medal_row(&mut self, ui: &mut Ui) {
+        let mut click = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            for cl in CodeLang::ALL {
+                let n = self.progress.complete_count(cl);
+                if n == 0 {
+                    continue;
+                }
+                let on = self.code_lang == cl;
+                let resp = medal_chip(ui, cl, n, on, self.lang);
+                if resp.clicked() {
+                    click = Some(cl);
+                }
+            }
+        });
+        if let Some(cl) = click {
+            self.set_code_lang(cl);
+        }
+    }
+}
+
+fn medal_chip(ui: &mut Ui, lang: CodeLang, n: usize, on: bool, ui_lang: Lang) -> egui::Response {
+    let label = format!("{} {n}", lang.label());
+    let galley = ui.painter().layout_no_wrap(
+        label.clone(),
+        FontId::monospace(10.0),
+        pal().text,
+    );
+    let w = 18.0 + galley.size().x + 8.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 16.0), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let c = Pos2::new(rect.left() + 8.0, rect.center().y);
+    paint_medal(ui, c, on);
+    ui.painter().text(
+        Pos2::new(c.x + 10.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::monospace(10.0),
+        if on { pal().accent } else { pal().dim },
+    );
+    resp.on_hover_text(tr(
+        ui_lang,
+        "Completados en este lenguaje",
+        "Completed in this language",
+    ))
+}
+
+fn paint_medal(ui: &Ui, c: Pos2, on: bool) {
+    let gold = if on {
+        pal().warn
+    } else {
+        pal().accent
+    };
+    let p = ui.painter();
+    p.circle_filled(c, 6.2, gold);
+    p.circle_stroke(c, 6.2, Stroke::new(1.1_f32, pal().text));
+    p.circle_filled(c, 3.2, pal().bg);
+    p.circle_filled(c, 1.6, gold);
+    let ribbon = Color32::from_rgb(
+        gold.r().saturating_sub(30),
+        gold.g().saturating_sub(40),
+        gold.b().saturating_sub(10),
+    );
+    p.line_segment(
+        [c + Vec2::new(-2.2, 5.2), c + Vec2::new(-3.4, 9.5)],
+        Stroke::new(2.0_f32, ribbon),
+    );
+    p.line_segment(
+        [c + Vec2::new(2.2, 5.2), c + Vec2::new(3.4, 9.5)],
+        Stroke::new(2.0_f32, ribbon),
     );
 }
 

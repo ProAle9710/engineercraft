@@ -386,6 +386,7 @@ fn evaluate_dotnet(source: &str, needles: &[String]) -> Outcome {
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
     <StartupObject>Starter</StartupObject>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
@@ -412,12 +413,10 @@ fn evaluate_dotnet(source: &str, needles: &[String]) -> Outcome {
             errors: parse_dotnet(&err),
         };
     }
-    match run_cmd(
-        command("dotnet")
-            .current_dir(&dir)
-            .args(["run", "--no-build", "-nologo"]),
-        Duration::from_secs(8),
-    ) {
+    let mut run = command("dotnet");
+    run.current_dir(&dir)
+        .args(["run", "--no-build", "-nologo"]);
+    match run_cmd(run, Duration::from_secs(8)) {
         RunJava::Timeout => Outcome::Timeout,
         RunJava::Failed { stdout, stderr } => Outcome::RuntimeError {
             line: parse_cs_runtime(&stderr).0,

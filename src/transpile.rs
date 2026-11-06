@@ -80,15 +80,39 @@ fn py_prefix(java_prefix: &str) -> String {
 }
 
 fn to_cs(src: &str) -> String {
-    src.replace("System.out.println", "Console.WriteLine")
-        .replace("System.out.print", "Console.Write")
-        .replace("boolean ", "bool ")
-        .replace("String ", "string ")
-        .replace("String[]", "string[]")
-        .replace(".length()", ".Length")
-        .replace(".length", ".Length")
-        .replace(".equals(", ".Equals(")
-        .replace(".charAt(", "[")
+    map_code_lines(src, |l| {
+        l.replace("System.out.println", "Console.WriteLine")
+            .replace("System.out.print", "Console.Write")
+            .replace("boolean ", "bool ")
+            .replace("String ", "string ")
+            .replace("String[]", "string[]")
+            .replace(".length()", ".Length")
+            .replace(".length", ".Length")
+            .replace(".equals(", ".Equals(")
+            .replace(".charAt(", "[")
+    })
+}
+
+fn map_code_lines(src: &str, mut f: impl FnMut(&str) -> String) -> String {
+    let mut out = String::new();
+    for line in src.split_inclusive('\n') {
+        let (nl, raw) = if let Some(s) = line.strip_suffix('\n') {
+            (true, s)
+        } else {
+            (false, line)
+        };
+        let t = raw.trim_start();
+        let mapped = if t.starts_with("//") || t.starts_with('#') {
+            raw.to_string()
+        } else {
+            f(raw)
+        };
+        out.push_str(&mapped);
+        if nl {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn to_py(src: &str) -> String {
@@ -99,6 +123,14 @@ fn to_py(src: &str) -> String {
         } else {
             (false, line)
         };
+        if raw.trim_start().starts_with("//") || raw.trim_start().starts_with('#') {
+            let l = raw.replace("//", "#");
+            out.push_str(&l);
+            if nl {
+                out.push('\n');
+            }
+            continue;
+        }
         let mut l = raw.to_string();
         l = l.replace("System.out.println", "print");
         l = l.replace("System.out.print", "print");

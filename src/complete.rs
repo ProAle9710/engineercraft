@@ -17,15 +17,31 @@ pub struct Prefix {
     pub recv_type: Option<String>,
 }
 
-pub fn matching(prefix: &Prefix, code: &str, lang: Lang) -> Vec<Completion> {
-    suggest(prefix, code, false, lang)
+pub fn matching(
+    prefix: &Prefix,
+    code: &str,
+    lang: Lang,
+    code_lang: crate::codelang::CodeLang,
+) -> Vec<Completion> {
+    suggest(prefix, code, false, lang, code_lang)
 }
 
-pub fn matching_forced(prefix: &Prefix, code: &str, lang: Lang) -> Vec<Completion> {
-    suggest(prefix, code, true, lang)
+pub fn matching_forced(
+    prefix: &Prefix,
+    code: &str,
+    lang: Lang,
+    code_lang: crate::codelang::CodeLang,
+) -> Vec<Completion> {
+    suggest(prefix, code, true, lang, code_lang)
 }
 
-fn suggest(prefix: &Prefix, code: &str, forced: bool, lang: Lang) -> Vec<Completion> {
+fn suggest(
+    prefix: &Prefix,
+    code: &str,
+    forced: bool,
+    lang: Lang,
+    code_lang: crate::codelang::CodeLang,
+) -> Vec<Completion> {
     let p = prefix.text.to_ascii_lowercase();
     if !forced && p.is_empty() && !prefix.after_dot {
         return Vec::new();
@@ -51,6 +67,33 @@ fn suggest(prefix: &Prefix, code: &str, forced: bool, lang: Lang) -> Vec<Complet
                 ));
             }
         }
+    }
+
+    if code_lang != crate::codelang::CodeLang::Java {
+        for api in alt_snippets(code_lang) {
+            let l = api.label.to_ascii_lowercase();
+            let ok = (forced && p.is_empty())
+                || l.starts_with(&p)
+                || (!p.is_empty() && l.contains(&p));
+            if ok && seen.insert(api.label.to_string()) {
+                hits.push((
+                    0,
+                    item(
+                        api.label,
+                        api.insert,
+                        api.detail,
+                        if lang == Lang::Es {
+                            api.doc_es
+                        } else {
+                            api.doc_en
+                        }
+                        .into(),
+                    ),
+                ));
+            }
+        }
+        hits.sort_by_key(|(rank, item)| (*rank, item.label.len()));
+        return hits.into_iter().map(|(_, c)| c).take(14).collect();
     }
 
     let recv = prefix.recv_type.as_deref();
@@ -545,6 +588,88 @@ fn var_doc(lang: Lang, name: &str, kind: &str) -> String {
         format!("{name}: {kind}. length = cantidad de casillas. Índices 0..length-1.")
     } else {
         format!("{name}: {kind}. {base}")
+    }
+}
+
+fn alt_snippets(code_lang: crate::codelang::CodeLang) -> Vec<Api> {
+    match code_lang {
+        crate::codelang::CodeLang::CSharp => vec![
+            Api {
+                label: "if",
+                insert: "if (|) {\n            \n        }",
+                detail: "if",
+                doc_es: "if (cond) { }",
+                doc_en: "if (cond) { }",
+                owner: None,
+                global: true,
+            },
+            Api {
+                label: "for",
+                insert: "for (|) {\n            \n        }",
+                detail: "for",
+                doc_es: "for (;;) { }",
+                doc_en: "for (;;) { }",
+                owner: None,
+                global: true,
+            },
+            Api {
+                label: "while",
+                insert: "while (|) {\n            \n        }",
+                detail: "while",
+                doc_es: "while (cond) { }",
+                doc_en: "while (cond) { }",
+                owner: None,
+                global: true,
+            },
+            Api {
+                label: "WriteLine",
+                insert: "Console.WriteLine(|);",
+                detail: "print",
+                doc_es: "Console.WriteLine — imprime una línea.",
+                doc_en: "Console.WriteLine — print a line.",
+                owner: None,
+                global: true,
+            },
+        ],
+        crate::codelang::CodeLang::Python => vec![
+            Api {
+                label: "if",
+                insert: "if |:\n    ",
+                detail: "if",
+                doc_es: "if cond:",
+                doc_en: "if cond:",
+                owner: None,
+                global: true,
+            },
+            Api {
+                label: "for",
+                insert: "for | in :\n    ",
+                detail: "for",
+                doc_es: "for x in seq:",
+                doc_en: "for x in seq:",
+                owner: None,
+                global: true,
+            },
+            Api {
+                label: "while",
+                insert: "while |:\n    ",
+                detail: "while",
+                doc_es: "while cond:",
+                doc_en: "while cond:",
+                owner: None,
+                global: true,
+            },
+            Api {
+                label: "print",
+                insert: "print(|)",
+                detail: "print",
+                doc_es: "print(...) — imprime.",
+                doc_en: "print(...) — output.",
+                owner: None,
+                global: true,
+            },
+        ],
+        crate::codelang::CodeLang::Java => Vec::new(),
     }
 }
 

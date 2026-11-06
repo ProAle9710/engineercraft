@@ -2,6 +2,7 @@
 
 mod app;
 mod catalog;
+mod codelang;
 mod complete;
 mod debug;
 mod highlight;
@@ -13,6 +14,7 @@ mod practice;
 mod progress;
 mod runner;
 mod theme;
+mod transpile;
 mod update;
 mod version;
 
