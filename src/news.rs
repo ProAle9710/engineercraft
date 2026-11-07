@@ -9,6 +9,15 @@ pub struct Release {
 /// Añade un bloque arriba al publicar (versión = CARGO_PKG_VERSION).
 pub const RELEASES: &[Release] = &[
     Release {
+        version: "0.2.2",
+        es: &[
+            "Ya puedes borrar comillas y paréntesis autocerrados: el autocierre solo actúa al escribir.",
+        ],
+        en: &[
+            "Auto-closed quotes and brackets delete normally now: auto-close only triggers while typing.",
+        ],
+    },
+    Release {
         version: "0.2.1",
         es: &[
             "Selector Java / C# / Python: el mismo ejercicio en el otro lenguaje.",
@@ -78,11 +87,40 @@ pub const RELEASES: &[Release] = &[
     },
 ];
 
-pub fn for_version(v: &str) -> &'static Release {
-    RELEASES
+/// Releases más nuevos que `since` (última versión vista). Con `since` vacío
+/// (instalación nueva) devuelve solo la entrada de `current`.
+pub fn unseen(since: &str, current: &str) -> Vec<&'static Release> {
+    if since.is_empty() {
+        return RELEASES
+            .iter()
+            .find(|r| r.version == current)
+            .into_iter()
+            .collect();
+    }
+    let rels: Vec<&'static Release> = RELEASES
         .iter()
-        .find(|r| r.version == v)
-        .unwrap_or(&RELEASES[0])
+        .filter(|r| semver_gt(r.version, since))
+        .collect();
+    if rels.is_empty() {
+        return RELEASES
+            .iter()
+            .find(|r| r.version == current)
+            .into_iter()
+            .collect();
+    }
+    rels
+}
+
+fn semver_gt(a: &str, b: &str) -> bool {
+    fn parse(v: &str) -> (u32, u32, u32) {
+        let mut it = v.split('.').map(|p| p.parse().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    }
+    parse(a) > parse(b)
 }
 
 pub fn items(rel: &Release, lang: Lang) -> &'static [&'static str] {

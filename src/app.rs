@@ -593,8 +593,10 @@ impl EngineerCraft {
             return;
         }
         let lang = self.lang;
-        let rel = crate::news::for_version(crate::version::APP_VERSION);
-        let items = crate::news::items(rel, lang);
+        let rels = crate::news::unseen(
+            &self.progress.last_seen_version,
+            crate::version::APP_VERSION,
+        );
         let mut close = false;
         let screen = ctx.screen_rect();
         egui::Area::new(egui::Id::new("news_scrim"))
@@ -634,17 +636,32 @@ impl EngineerCraft {
                         .color(pal().accent),
                 );
                 ui.label(
-                    RichText::new(format!("{} v{}", crate::version::APP_NAME, rel.version))
-                        .font(FontId::new(20.0, FontFamily::Proportional))
-                        .color(pal().text),
+                    RichText::new(format!(
+                        "{} v{}",
+                        crate::version::APP_NAME,
+                        crate::version::APP_VERSION
+                    ))
+                    .font(FontId::new(20.0, FontFamily::Proportional))
+                    .color(pal().text),
                 );
                 ui.add_space(12.0);
-                for line in items {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("▸").color(pal().accent).monospace());
-                        ui.label(RichText::new(*line).size(13.5).color(pal().text));
-                    });
-                    ui.add_space(6.0);
+                for rel in &rels {
+                    if rels.len() > 1 {
+                        ui.label(
+                            RichText::new(format!("v{}", rel.version))
+                                .monospace()
+                                .size(10.0)
+                                .color(pal().accent),
+                        );
+                        ui.add_space(4.0);
+                    }
+                    for line in crate::news::items(rel, lang) {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("▸").color(pal().accent).monospace());
+                            ui.label(RichText::new(*line).size(13.5).color(pal().text));
+                        });
+                        ui.add_space(6.0);
+                    }
                 }
                 ui.add_space(10.0);
                 if ui
