@@ -24,3 +24,7 @@ __pycache__/
 *.log
 /engineercraft.exe
 /javacraft.exe
+/nul
+/con
+/aux
+/prn

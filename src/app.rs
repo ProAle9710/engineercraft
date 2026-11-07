@@ -2253,16 +2253,23 @@ impl EngineerCraft {
                                 self.refresh_completions();
                             }
                             if output.response.changed() && !self.running {
-                                if let Some((next, cur)) =
-                                    crate::pair::autoclose(
-                                        &self.code,
-                                        self.cursor_bytes,
-                                        self.code_lang,
-                                    )
-                                {
-                                    self.code = next;
-                                    self.cursor_bytes = cur;
-                                    self.pending_cursor = Some(cur);
+                                let typed = ui.ctx().input(|i| {
+                                    i.events
+                                        .iter()
+                                        .any(|e| matches!(e, egui::Event::Text(_)))
+                                });
+                                if typed {
+                                    if let Some((next, cur)) =
+                                        crate::pair::autoclose(
+                                            &self.code,
+                                            self.cursor_bytes,
+                                            self.code_lang,
+                                        )
+                                    {
+                                        self.code = next;
+                                        self.cursor_bytes = cur;
+                                        self.pending_cursor = Some(cur);
+                                    }
                                 }
                                 self.refresh_completions();
                                 self.mark_dirty();
